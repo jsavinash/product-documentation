@@ -1,1384 +1,1174 @@
-# E-Commerce Microservices Platform — System Documentation
+# E-Commerce Microservices Platform — Production System Architecture & Technical Specification
 
-**Project:** Enterprise E-Commerce Microservices Platform  
-**Tech Stack:** Java/Kotlin · Gradle (`build.gradle.kts`) · API Gateway · Central Config Server · Service Discovery  
-**Domain Modules:** User, Product, Item Management, Cart, Order, Payment, Notification, Offers, Review & Ratings, Recommendations, Serviceability, Archival  
-**Status:** Draft v1.0  
-**Owner:** Principal Product Manager & Lead Distributed Systems Architect
-
----
-
-## LAYER 1: BUSINESS SPECIFICATION
-
-### 1.1 Business Objective & Problem Statement
-
-**Problem Statement:**  
-Legacy monolithic e-commerce platforms suffer from tightly coupled domains where a change to pricing logic forces redeployment of the entire application. Peak traffic events (flash sales, holiday promotions) cause cascading failures across inventory, cart, and checkout services because there is no isolation or independent scaling. Vendor onboarding takes weeks due to monolithic schema migrations, and real-time personalization is impractical because recommendation logic competes for database resources with transactional order processing.
-
-**Market Gap:**  
-Mid-market merchants lack an enterprise-grade, domain-driven e-commerce platform that offers independent scalability per domain, event-driven consistency across services, and real-time personalization without the operational overhead of building distributed systems from scratch.
-
-**Business Objective:**  
-Launch a cloud-native, microservices-based e-commerce platform capable of handling 10,000+ concurrent buyers during peak flash-sale events, with sub-200ms P99 API latency for product catalog reads, sub-500ms P99 for checkout flows, and 99.99% uptime for order and payment services. Enable independent deployment cadence per domain (User, Product, Cart, Order, Payment, Notification, Offers, Serviceability, Recommendations, Review & Ratings, Item Management, Archival) with zero-downtime releases.
-
-### 1.2 Core Value Proposition
-
-| Stakeholder | Value Proposition | Delivered By |
-|-------------|-------------------|--------------|
-| **Buyer** | Sub-second product search, real-time stock visibility, one-click checkout, personalized recommendations, instant order confirmation and delivery tracking | Product, Item, Cart, Order, Payment, Recommendations, Notification |
-| **Vendor** | Independent catalog management, dynamic pricing/promotions, serviceability (delivery pincode checks), review management, archival of historical orders | Product, Offers, Serviceability, Review & Ratings, Archival |
-| **Platform Operator** | Independent service scaling, centralized config, service discovery, circuit breaking, observability per domain | API Gateway, Config Server, Service Discovery |
-| **Platform Owner** | Monetization via transaction fees, subscription tiers, promotional placement fees | Offers, Payment, Order |
-
-### 1.3 Microservice Ecosystem KPIs
-
-| KPI | Definition | Target | Mapped Services |
-|-----|------------|--------|-----------------|
-| **Cart-to-Order Conversion Rate** | % of carts that convert to completed orders | ≥ 68% | Cart → Order → Payment |
-| **Order Fulfillment Time** | Time from order placement to "shipped" status | P95 ≤ 4 hours | Order → Item → Notification |
-| **Offer Redemption Rate** | % of issued promo codes successfully redeemed | ≥ 45% | Offers → Cart → Order → Payment |
-| **Serviceability Success Rate** | % of pincode serviceability checks returning within SLA | P99 ≤ 100ms, ≥ 99.5% | Serviceability → Item |
-| **Platform Availability** | Uptime of Order and Payment services | 99.99% | Order, Payment, API Gateway |
-
-### 1.4 Monetization Model
-
-1. **Transaction Fee (Primary):** 2.5%–4.5% of gross merchandise value (GMV) per completed order, collected by the Payment service and settled to the platform owner daily.
-2. **Vendor Subscription Tiers (Secondary):** Monthly SaaS fees for vendors: Starter ($49/mo), Growth ($199/mo), Enterprise ($799/mo). Managed by User service with entitlement checks in Product and Offers services.
-3. **Promotional Placement (Tertiary):** Vendors pay for featured placement in Recommendations and Product search results. Managed by Offers and Recommendations services.
-4. **Direct Sales (Platform-Owned Inventory):** Platform sells private-label goods directly; revenue recognized in Order service.
+**Project:** Enterprise Cloud-Native E-Commerce Microservices Platform  
+**Architecture Classification:** Distributed Event-Driven Microservices Architecture (CQRS + Saga Orchestration)  
+**Tech Stack:** Java 21 / Kotlin 2.0 · Gradle (`build.gradle.kts`) · Spring Boot 3.3 / Micronaut · Spring Cloud Gateway / Envoy · Istio Service Mesh · Apache Kafka · PostgreSQL 16 · Redis 7 Cluster · OpenSearch 2.13 · HashiCorp Vault · Kubernetes (EKS/GKE)  
+**Domain Modules (Bounded Contexts):** User & IAM, Product Catalog, Item Management & Inventory, Cart & Checkout Session, Order Processing, Payment & Settlement Ledger, Notification Engine, Offers & Promotions, Review & Ratings, Recommendations & Personalization, Serviceability & Logistics, Data Archival & Compliance  
+**Document Version:** 2.0 (Production-Grade Enterprise Baseline)  
+**Status:** Approved for Implementation  
+**Ownership:** Principal Distributed Systems Architect & Lead Product Architect  
 
 ---
 
-## LAYER 2: PRODUCT SENSE & USER EXPERIENCE
+## LAYER 1: BUSINESS SPECIFICATION & VALUE REALIZATION
+
+### 1.1 Executive Summary & Problem Statement
+
+#### 1.1.1 Problem Statement
+Legacy monolithic e-commerce platforms suffer from tight physical and logical coupling where changes to dynamic promotion or catalog schemas require risky, monolithic deployments. Peak flash-sale and seasonal traffic surges (e.g., 50x baseline) induce cascading failures across relational databases, causing lock contention in inventory and checkout tables that paralyzes the entire system. Vendor onboarding takes weeks due to monolithic schema migrations, while real-time personalization algorithms compete directly for CPU and database connection pools with mission-critical order-processing transactions.
+
+#### 1.1.2 Market Gap
+Mid-market and enterprise multi-vendor merchants require a platform that provides:
+1. **Independent Elasticity:** Ability to scale read-heavy catalog searches (50,000+ QPS) independently from write-heavy transactional checkouts (1,000+ TPS).
+2. **Deterministic Flash-Sale Performance:** Guaranteed atomic stock reservation without database deadlocks during high-contention traffic spikes.
+3. **Decoupled Business Agility:** Zero-downtime releases allowing separate deployment cycles across 12 distinct functional domains.
+4. **Resilient Eventual Consistency:** Fault-tolerant distributed transactions that eliminate double-charging, phantom stock reservations, and silent event loss.
+
+#### 1.1.3 Business Objectives & Target Service Level Objectives (SLOs)
+* **Scale Target:** Support 50,000,000 registered users, 5,000,000 Daily Active Users (DAU), and peak throughput of 1,000 completed checkout transactions per second (TPS) during flash-sale events.
+* **Catalog Latency:** Sub-100ms P99 API response time for product catalog search and listing views.
+* **Checkout Latency:** Sub-400ms P99 end-to-end response time for order placement and payment initiation.
+* **High Availability:** 99.99% availability for critical path services (Order, Payment, Inventory, Gateway), equating to less than 4.38 minutes of unscheduled downtime per month.
+
+---
+
+### 1.2 Core Value Proposition Matrix
+
+| Stakeholder | Pain Point in Legacy Architecture | Value Proposition in Target Platform | Key Enabling Microservices |
+| :--- | :--- | :--- | :--- |
+| **Buyer (Consumer)** | Stockouts discovered only at final payment step; slow page hydration; lost carts across device switches; payment failures with ambiguous states. | Sub-second faceted catalog search; real-time Available-to-Promise (ATP) stock visibility; persistent cross-device carts; transparent order tracking via SSE. | Product Catalog, Inventory, Cart, Order, Payment, Serviceability, Notification |
+| **Merchant / Vendor** | Delayed inventory synchronization; manual price updates; inability to run targeted flash promos; opaque payout reconciliation. | Real-time multi-warehouse inventory feed; self-serve promotional campaign configuration; dynamic regional serviceability controls; transparent automated settlement ledgers. | Product, Inventory, Offers, Serviceability, Payment, Review & Ratings |
+| **Platform Operator (SRE)** | Single point of failure; cascading service degradation; lack of distributed tracing; risky all-or-nothing deployments. | Zero-downtime canary deployments; circuit breaker isolation; automated horizontal pod autoscaling (HPA); unified OpenTelemetry distributed tracing and metrics. | API Gateway, Service Mesh, Config Server, Central IAM |
+| **Platform Owner (Executive)** | Revenue leakages from uncollected commission fees; lack of unified merchant monetization; slow expansion to new geographies. | Automated multi-tiered take-rate deductions; merchant SaaS subscription tier enforcement; paid promotional placements; auditable compliance logs. | User & IAM, Offers, Payment, Recommendations, Archival |
+
+---
+
+### 1.3 Key Performance Indicators (KPIs) & Target SLAs
+
+```
+                               ┌───────────────────────────┐
+                               │   PLATFORM HEALTH (99.99%)│
+                               └─────────────┬─────────────┘
+                                             │
+             ┌───────────────────────────────┼───────────────────────────────┐
+             ▼                               ▼                               ▼
+┌─────────────────────────┐     ┌─────────────────────────┐     ┌─────────────────────────┐
+│     CONVERSION FUNNEL   │     │    FULFILLMENT & SLA    │     │      FINANCIAL SLA      │
+│ • Cart-to-Order: ≥ 70%  │     │ • Order-to-Ship: ≤ 4h   │     │ • Payment Success: ≥98% │
+│ • Catalog P99: < 100ms  │     │ • Pincode Check: < 50ms │     │ • Reconciliation: 100%  │
+│ • Search CTR: ≥ 18%     │     │ • Stock Drift: 0.00%    │     │ • Dispute Rate: < 0.1%  │
+└─────────────────────────┘     └─────────────────────────┘     └─────────────────────────┘
+```
+
+| Domain Metric | Formal Definition | Target SLA / SLO | Measurement Boundary | Upstream / Downstream Services |
+| :--- | :--- | :--- | :--- | :--- |
+| **Cart-to-Order Conversion** | `(Completed Orders / Created Carts) * 100` | $\ge 70\%$ | Gateway to Order Confirmation | Cart $\rightarrow$ Inventory $\rightarrow$ Offers $\rightarrow$ Payment $\rightarrow$ Order |
+| **Catalog Query P99 Latency** | Time elapsed for faceted search / detail queries | $\le 100\text{ ms}$ | API Gateway Entry to Client | API Gateway $\rightarrow$ Product Catalog $\rightarrow$ OpenSearch |
+| **Checkout Flow P99 Latency** | Time to execute stock reservation and create payment intent | $\le 400\text{ ms}$ | POST `/checkout` to Client | Order $\rightarrow$ Inventory $\rightarrow$ Offers $\rightarrow$ Payment |
+| **Serviceability SLA** | Roundtrip latency for pincode/hub delivery calculation | $\le 50\text{ ms}$ (P99) | Client request to Gateway | Serviceability $\rightarrow$ Logistics Geofence |
+| **Payment Success Rate** | `(Authorized Payments / Attempted Payments) * 100` | $\ge 98.0\%$ | Payment Provider Webhook | Payment $\rightarrow$ External Gateway (Stripe/Adyen) |
+| **Inventory Accuracy** | `1 - (Phantom Oversells / Total Orders)` | $100.00\%$ | Reservation Token Expiration | Inventory Service $\rightarrow$ Redis Atomic Tokens |
+| **Offer Redemption Rate** | `(Redeemed Vouchers / Issued Vouchers) * 100` | $\ge 40\%$ | Cart Apply to Order Confirm | Offers Service $\rightarrow$ Cart |
+| **Fulfillment Handover** | Time from order placement to warehouse dispatch | $\text{P95} \le 4.0\text{ hours}$ | Order Confirmed to Carrier Scan | Order $\rightarrow$ Item/Inventory $\rightarrow$ Logistics |
+
+---
+
+### 1.4 Monetization & Financial Flow Mechanics
+
+1. **Transaction Commission (Take-Rate):**
+   * Variable take-rate between $2.5\%$ and $8.0\%$ deducted automatically on every completed order based on merchant category.
+   * Settled asynchronously via the Payment Service's double-entry ledger (`ledger_entries`) into escrow, disbursing net proceeds to vendors on a $T+2$ rolling basis.
+2. **Merchant SaaS Subscription Tiers:**
+   * **Starter ($49/month):** Up to 500 SKUs, standard catalog indexing, 5% commission.
+   * **Growth ($199/month):** Up to 10,000 SKUs, priority search ranking, 3.5% commission, dedicated account manager.
+   * **Enterprise ($799/month):** Unlimited SKUs, sub-minute inventory sync APIs, custom promo rules, 2.5% commission.
+3. **Promotional Placement Fees (Sponsored Products):**
+   * Cost-Per-Click (CPC) and Cost-Per-Impression (CPM) bidding engine managed by the Offers and Recommendations services, injecting sponsored catalog items into top search positions.
+4. **Logistics & Delivery Convenience Margins:**
+   * Dynamic delivery fee calculation by the Serviceability Service based on volumetric weight, distance band, and express fulfillment priority.
+
+---
+
+## LAYER 2: PRODUCT SENSE & USER EXPERIENCE SPECIFICATION
 
 ### 2.1 User Personas
 
-#### Persona A: Buyer (Primary Consumer)
-- **Profile:** Tech-savvy consumer, shops via mobile web/app, expects instant gratification
-- **Goals:** Find products quickly, verify stock/delivery, checkout seamlessly, track orders
-- **Pain Points:** Stockouts discovered at checkout, slow page loads, payment failures without clear retry paths, no delivery visibility
-- **Key Services Touched:** Product, Item, Cart, Order, Payment, Notification, Recommendations, Serviceability, Review & Ratings
+```
+┌────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                       TARGET PLATFORM PERSONAS                                         │
+├────────────────────────────┬────────────────────────────┬─────────────────────────────┬────────────────┤
+│ 1. Buyer (Consumer)        │ 2. Merchant / Seller       │ 3. Customer Operations      │ 4. Platform SRE│
+│ • Intent: Frictionless buy │ • Intent: Catalog & orders │ • Intent: Issue resolution  │ • Intent: SLA  │
+│ • Primary: Mobile/Web      │ • Primary: Merchant Portal │ • Primary: Internal Admin   │ • Primary: K8s │
+│ • Latency Sensitive: High  │ • Batch/CRUD Heavy: High   │ • Audit & Traceability: High│ • Zero Downtime│
+└────────────────────────────┴────────────────────────────┴─────────────────────────────┴────────────────┘
+```
 
-#### Persona B: Vendor / Seller (Secondary Operator)
-- **Profile:** Small-to-medium business owner managing catalog, inventory, and promotions
-- **Goals:** List products, set pricing, run promotions, manage reviews, fulfill orders
-- **Pain Points:** Complex onboarding, no real-time inventory sync, delayed payout visibility, inability to run targeted offers
-- **Key Services Touched:** Product, Item, Offers, Order, Review & Ratings, Archival, Payment (payouts)
+#### Persona 1: Consumer Buyer (Aisha)
+* **Demographics:** Urban professional, mobile-first shopper, high disposable income, zero tolerance for payment friction.
+* **Goals:** Instant search with autocomplete, real-time stock certainty, single-click checkout, instant payment confirmation, live delivery tracking.
+* **Frustrations:** Products appearing in stock that fail at checkout; ambiguous payment processing spinners; delayed SMS/email confirmations.
+* **Services Interacted:** API Gateway, Product Catalog, Cart, Inventory, Offers, Payment, Order, Notification, Recommendations.
 
-#### Persona C: Platform Operator (Tertiary)
-- **Profile:** DevOps / SRE team managing the platform infrastructure
-- **Goals:** Deploy services independently, monitor per-domain SLAs, rollback failed deployments, manage config
-- **Key Services Touched:** API Gateway, Config Server, Service Discovery, all domain services
+#### Persona 2: Multi-Warehouse Merchant (Rajesh)
+* **Demographics:** Mid-sized electronic retailer operating across 3 regional fulfillment warehouses.
+* **Goals:** Bulk SKU updates via API/CSV; real-time inventory synchronization from local ERP; dynamic promo code creation; automated bi-weekly payout settlements.
+* **Frustrations:** Delayed inventory updates causing overselling; opaque return processing fees; inability to restrict promotions to specific pincodes.
+* **Services Interacted:** Product Catalog, Item Management, Offers, Serviceability, Order, Review & Ratings, Archival.
+
+#### Persona 3: Customer Operations Specialist (Elena)
+* **Demographics:** Platform support lead handling tier-2 escalations and chargebacks.
+* **Goals:** Unified single-screen timeline of order state transitions, payment gateway transaction IDs, stock reservation logs, and notification delivery receipts.
+* **Frustrations:** Disjointed database logs across multiple services; inability to issue partial refunds or manual stock re-allocations without engineering tickets.
+* **Services Interacted:** Order, Payment, Inventory, Notification, User & IAM, Archival.
+
+#### Persona 4: Platform SRE (Vikram)
+* **Demographics:** Distributed systems engineer maintaining infrastructure stability and resilience.
+* **Goals:** Zero-downtime deployments via canary traffic shifting; immediate detection of circuit breaker trip events; strict tenant rate-limiting.
+* **Services Interacted:** API Gateway, Istio Service Mesh, HashiCorp Vault, Kafka Cluster, Prometheus/Grafana.
+
+---
 
 ### 2.2 End-to-End User Journeys
 
-#### Journey 1: Product Search → Cart Addition
+#### Journey 1: Search Discovery, Real-Time ATP Verification & Atomic Cart Addition
 
-| Step | Actor | Service | Action | Data Flow |
-|------|-------|---------|--------|-----------|
-| 1 | Buyer | API Gateway | GET `/search?q=wireless+headphones&page=1&size=20` | Gateway routes to Product + Recommendations |
-| 2 | Product | Product Service | Elasticsearch full-text search; returns 20 products | Product DB (Elasticsearch + PostgreSQL) |
-| 3 | Product | Recommendations Service | Injects personalized "You may also like" items | User profile + collaborative filtering |
-| 4 | Item | Item Service | Batch stock check for 20 product SKUs | Item DB (PostgreSQL + Redis cache) |
-| 5 | API Gateway | Aggregation Layer | Merges product details + stock + recommendations into single response | Client receives unified product catalog |
-| 6 | Buyer | UI | Selects product, clicks "Add to Cart" | POST `/cart/items` |
-| 7 | Cart | Cart Service | Validates stock via Item service (circuit breaker protected); adds item | Cart DB (Redis) → Item Service (gRPC/REST) |
-| 8 | Cart | Cart Service | Returns updated cart with line-item total | Client hydrates cart UI |
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Buyer as Buyer (Browser/App)
+    participant GW as API Gateway (Envoy)
+    participant Prod as Product Service
+    participant OS as OpenSearch Cluster
+    participant Item as Item / Inventory Service
+    participant Redis as Redis Stock Cluster
+    participant Cart as Cart Service
 
-#### Journey 2: Cart Checkout → Payment → Notification
+    Buyer->>GW: GET /api/v1/products/search?q=anc+headphones&pincode=110001
+    GW->>Prod: Forward Search Request
+    Prod->>OS: Execute Boolean Query (Text Match + Facets + Stock Filter)
+    OS-->>Prod: Top 20 Product Summaries
+    Prod->>Item: Batch Check Available-to-Promise (SKUs, Pincode)
+    Item->>Redis: MGET stock:sku_101, stock:sku_102...
+    Redis-->>Item: Live Stock Counters
+    Item-->>Prod: Enriched Stock & Delivery Estimate Matrix
+    Prod-->>GW: Enriched Search Response (JSON)
+    GW-->>Buyer: Hydrate Product Grid (with Stock & SLAs)
 
-| Step | Actor | Service | Action | Data Flow |
-|------|-------|---------|--------|-----------|
-| 1 | Buyer | API Gateway | POST `/checkout/initialize` | Gateway → Order Service |
-| 2 | Order | Order Service | Creates order in `PENDING_PAYMENT` state; reserves stock via Item service (Saga: reserve) | Order DB (PostgreSQL) → Item Service |
-| 3 | Order | Order Service | Calculates totals: subtotal + tax + shipping - discounts (from Offers) | Offers Service (discount validation) |
-| 4 | Payment | Payment Service | Creates payment intent; redirects buyer to payment provider | Payment DB (PostgreSQL) |
-| 5 | Buyer | Payment Provider | Completes payment (card/UPI/wallet) | External payment gateway |
-| 6 | Payment | Payment Service | Webhook receives `payment.success`; updates payment status | Payment DB → Order Service (event) |
-| 7 | Order | Order Service | Saga step: confirm order → `CONFIRMED`; release stock reservation → `CONFIRMED` | Item Service (release reservation) |
-| 8 | Notification | Notification Service | Sends order confirmation email + SMS | Email/SMS provider |
-| 9 | Order | Order Service | Emits `OrderConfirmed` event to Kafka | Archival Service consumes for historical storage |
-| 10 | Buyer | UI | Redirects to order confirmation page with tracking ID | Polls Order service for status updates |
+    Buyer->>GW: POST /api/v1/cart/items (SKU, Qty=1, SessionID)
+    GW->>Cart: Add Item Command
+    Cart->>Item: Validate SKU Active & Max Per Order Limit
+    Item-->>Cart: Validation Passed
+    Cart->>Cart: Atomically Update Cart Aggregate in Redis
+    Cart-->>GW: Updated Cart View (Items, Subtotal)
+    GW-->>Buyer: 200 OK (Optimistic UI Confirmation)
+```
 
-### 2.3 Functional Requirements (PRD Style)
+#### Journey 2: Distributed Checkout, Saga Stock Reservation & Payment Capture
 
-| ID | Feature | Priority | Owner Service(s) | Description |
-|----|---------|----------|------------------|-------------|
-| FR-01 | Product search with filters | Must-Have | Product, Item | Full-text search, category, price range, brand, stock availability |
-| FR-02 | Real-time stock verification | Must-Have | Item, Cart | Stock checked before cart addition and at checkout |
-| FR-03 | Cart persistence across sessions | Must-Have | Cart | Redis-backed cart with 30-day TTL |
-| FR-04 | Multi-payment methods | Must-Have | Payment | Card, UPI, wallet, EMI; webhook reconciliation |
-| FR-05 | Order status tracking | Must-Have | Order, Notification | Buyer sees order state transitions; email/SMS on change |
-| FR-06 | Dynamic promo codes | Should-Have | Offers, Cart | Percentage/fixed discounts, min-order constraints, expiry |
-| FR-07 | Serviceability (pincode check) | Should-Have | Serviceability, Item | Delivery availability and estimated date per pincode |
-| FR-08 | Product reviews & ratings | Should-Have | Review & Ratings, Product | 1-5 star ratings, text reviews, vendor response |
-| FR-09 | Personalized recommendations | Should-Have | Recommendations, Product | Collaborative filtering + trending items injected into search |
-| FR-10 | Order archival | Nice-to-Have | Archival, Order | Orders older than 90 days moved to cold storage; retrievable on demand |
-| FR-11 | Vendor promo placement | Nice-to-Have | Offers, Recommendations | Paid featured slots in search and homepage |
-| FR-12 | Subscription tier entitlements | Nice-to-Have | User, Offers | Tier-based discount caps, free shipping thresholds |
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Buyer as Buyer
+    participant GW as API Gateway
+    participant Order as Order Service (Saga Orchestrator)
+    participant Offers as Offers Service
+    participant Item as Inventory Service
+    participant Pay as Payment Service
+    participant Stripe as External Gateway (Stripe)
+    participant Kafka as Kafka Event Bus
+    participant Notif as Notification Service
 
-### 2.4 Cross-Service Edge Cases & Failure Modes
+    Buyer->>GW: POST /api/v1/orders/checkout (CartID, AddressID, PaymentMethod)
+    GW->>Order: Initialize Order Saga
+    Order->>Offers: Validate & Lock Promo Code (DIWALI20)
+    Offers-->>Order: Promo Locked (Discount: ₹1,000)
+    Order->>Item: Reserve Stock (Order_123, SKU_101, Qty: 1, TTL: 600s)
+    Item->>Item: Execute Atomic Lua Script in Redis (Decrement & Create Lease)
+    Item-->>Order: Stock Reserved (Reservation_Token_789)
+    Order->>Pay: Create Payment Intent (Order_123, Amount: ₹8,999)
+    Pay->>Stripe: Initialize Client Secret (Stripe Elements)
+    Stripe-->>Pay: Client Secret (pi_3N9...)
+    Pay-->>Order: Payment Intent Ready
+    Order-->>GW: 201 Created (Order Status: PENDING_PAYMENT, Client Secret)
+    GW-->>Buyer: Render Payment Modal (3D Secure)
 
-| Scenario | Services Involved | Failure Mode | UX Handling |
-|----------|-------------------|--------------|-------------|
-| Stock changes during checkout | Cart → Order → Item | Item reserved for cart expires before payment completes | Cart shows "Item availability changed" warning; buyer can re-verify stock; auto-refresh cart every 30s via SSE |
-| Payment succeeds, Order creation times out | Payment → Order | Payment webhook received, Order service down | Idempotent payment webhook with retry (exponential backoff); Order service reconciles on recovery; buyer sees "Processing your order" with auto-poll |
-| Recommendations service down | Product → Recommendations | Personalized fallback unavailable | Graceful degradation: show trending/popular items instead; circuit breaker open for 30s |
-| Serviceability check times out | Cart → Serviceability | Pincode delivery unknown | Show "Delivery availability unknown — proceed at your own risk"; allow checkout with disclaimer |
-| Notification service down | Order → Notification | Order confirmed but no confirmation email | Outbox pattern: event persisted in Order DB; Notification service consumes on recovery; buyer can "Resend confirmation" |
-| Offers service rejects promo at checkout | Cart → Offers → Order | Promo code expired or invalid | Inline validation error on cart page; suggest alternative active promos from Offers service |
-| API Gateway timeout (504) | All | Upstream service slow | Client shows retry button with exponential backoff; Skeleton UI for partial data |
+    Buyer->>Stripe: Complete 3DS Authentication
+    Stripe->>Pay: Webhook: payment_intent.succeeded
+    Pay->>Pay: Idempotent Ledger Entry Recorded (DB Commit)
+    Pay->>Kafka: Publish PaymentCapturedEvent (Order_123)
+    Kafka->>Order: Consume PaymentCapturedEvent
+    Order->>Item: Commit Stock Reservation (Permanent Deduction)
+    Item-->>Order: Stock Committed
+    Order->>Order: Transition Order -> CONFIRMED (DB Commit)
+    Order->>Kafka: Publish OrderConfirmedEvent (Transactional Outbox)
+    Kafka->>Notif: Consume OrderConfirmedEvent
+    Notif->>Buyer: Dispatch SMS & Email Confirmation
+```
 
 ---
 
-## LAYER 3: UI ARCHITECTURE & CLIENT ENGAGEMENT
-
-### 3.1 API Gateway Integration & Aggregation with RADIO Framework
-
-The client application interacts with our microservices framework through the API Gateway using structured system design principles. We apply the **RADIO framework** (Requirements, Architecture, Data Model, Interface, Optimizations) to guide our integration strategy:
-
-**R - Requirements Exploration:**
-- Clarify user needs: product browsing, cart management, checkout, order tracking
-- Define supported devices: mobile web, desktop web, native apps
-- Establish constraints: sub-2s time-to-interactive, SEO requirements, accessibility (WCAG 2.1 AA)
-
-**A - Architecture / High-Level Design:**
-- **API Gateway Pattern:** Spring Cloud Gateway as single entry point at `https://api.platform.com/v1/{resource}`
-- **BFF (Backend for Frontend):** Gateway routes aggregate data from Product, Recommendations, and Item services in parallel
-- **Client-Server Architecture:** Stateless gateway routes to domain services; client manages session state via JWT
-- **Render Modes:** 
-  - SSR (Next.js) for product catalog pages (SEO critical)
-  - CSR/SPA for cart, checkout, and account pages (user-specific, dynamic)
-- **Global Load Balancing:** DNS-based routing to nearest data center; Cloudflare CDN at edge
-
-**D - Data Model:**
-- Unified product catalog view merging: product details + stock status + recommendations + reviews
-- Faceted search metadata: brands, price ranges, categories, availability
-- Cart state model: `{ items: LineItem[], promotions: [], totals: { subtotal, tax, shipping, grandTotal } }`
-- User profile: `{ id, email, addresses: Address[], preferences: { theme, locale, notifications } }`
-
-**I - Interface (API) Contracts:**
-- **REST endpoints:** `GET /api/v1/products`, `POST /api/v1/cart/items`, `GET /api/v1/orders/{id}`
-- **GraphQL (optional):** For complex detail pages requiring Product + Reviews + Recommendations in single query
-- **SSE endpoints:** `GET /api/v1/orders/{orderId}/stream` for real-time order status
-- **GraphQL schema excerpt:**
-  ```graphql
-  type Query {
-    products(filters: ProductFilters!, pagination: PaginationInput!): ProductConnection!
-    product(id: ID!): Product!
-    cart(userId: ID!): Cart!
-    order(id: ID!): Order!
-  }
-  
-  type Product {
-    id: ID!
-    name: String!
-    price: Decimal!
-    images: [String!]!
-    stockStatus: StockStatus!
-    averageRating: Float!
-    reviewCount: Int!
-    isInStock: Boolean!
-  }
-  ```
-
-**O - Optimizations & Performance:**
-- **Response Caching:** Gateway caches non-user-specific responses (product list: 60s TTL, recommendations: 300s TTL)
-- **Asset Optimization:** WebP/AVIF images with responsive `srcset`; critical CSS inlining
-- **Connection Multiplexing:** HTTP/2 or gRPC for all inter-service and client-gateway communication
-- **Edge Caching:** Cloudflare CDN for static assets (TTL 24h with purge on catalog update)
-- **Request Deduplication:** In-flight request merging for same product detail fetches
-- **Compression:** Brotli for JSON (> 200 bytes); 70% average reduction
-
-**Example Aggregated Response (`GET /v1/products?query=headphones&page=1`):**
-```json
-{
-  "products": [
-    {
-      "id": "prod_123",
-      "name": "Wireless Headphones Pro",
-      "price": 12999,
-      "currency": "INR",
-      "stockStatus": "IN_STOCK",
-      "stockQuantity": 45,
-      "serviceable": true,
-      "estimatedDelivery": "2026-11-03",
-      "averageRating": 4.5,
-      "reviewCount": 128,
-      "isRecommended": true,
-      "images": ["https://cdn.platform.com/images/prod_123/1.jpg"],
-      "vendorId": "vendor_456"
-    }
-  ],
-  "totalPages": 5,
-  "totalCount": 98,
-  "recommendations": [
-    {"id": "prod_789", "name": "USB-C Charging Cable", "price": 499}
-  ],
-  "facets": {
-    "brands": ["Sony", "Bose", "JBL"],
-    "priceRanges": [{"min": 0, "max": 5000}, {"min": 5001, "max": 15000}]
-  }
-}
-```
-
-### 3.2 Core UI States & Data Hydration with Frontend System Design Patterns
-
-**Six-State Component Contract (React/TypeScript):**  
-Expanded from four states to include `optimistic` and `offline` states per frontend system design best practices:
-
-```typescript
-type DataState<T> =
-  | { status: 'idle'; data: null; error: null }
-  | { status: 'loading'; data: T | null; error: null }
-  | { status: 'success'; data: T; error: null }
-  | { status: 'error'; data: T | null; error: ApiError }
-  | { status: 'optimistic'; data: T; error: null; pendingMutation: MutationId }
-  | { status: 'offline'; data: T | null; error: null; queueId: string };
-```
-
-**State Transitions per Operation:**
-
-| Operation | Initial | Loading Trigger | Success | Error | Optimistic | Offline |
-|-----------|---------|-----------------|---------|-------|------------|---------|
-| Product search | `idle` | Query typed (debounce 300ms) | 200 from Product | 4xx/5xx or timeout | N/A | Serve from cache |
-| Real-time stock check | `idle` | User selects variant | Item: `IN_STOCK` | Circuit open | N/A | Show cached status |
-| Cart addition | `idle` | User clicks "Add" | Cart confirms | Stock insufficient | `optimistic` → `success/error` | Queue → sync on reconnect |
-| Checkout / Order | `idle` | User clicks "Place Order" | Order ID returned | Payment timeout | `optimistic` → `success/error` | Queue → sync on reconnect |
-| Order status poll | `idle` | Page mount + 10s | `CONFIRMED` | 5 failures | N/A | Resume on reconnect |
-
-**React Query / SWR Configuration:**
-- **Stale-While-Revalidate:** Product catalog cached 5 min, revalidated in background
-- **Cache Invalidation:** `cart.deltas` event invalidates cart cache; `order.events` invalidates order cache
-- **Retry Logic:** 3 retries with exponential backoff (100ms → 1s → 5s); no retry on 4xx
-- **Refetch Interval:** Order status pages poll every 10s; product pages refetch on window focus
-
-**SSE for Real-Time Order Status:**
-- Client opens `EventSource` to `GET /v1/orders/{orderId}/stream`
-- Server pushes state transitions: PENDING → CONFIRMED → SHIPPED → DELIVERED
-- Automatic reconnection on disconnect with `Last-Event-ID` header for resume
-
-**Race Condition Handling:**
-- **AbortController:** Cancel in-flight requests when component unmounts or user navigates away
-- **Version Stamps:** Each cart operation includes `version` field; server rejects stale operations
-- **Deduplication:** In-flight request dedup keyed by request signature (endpoint + params)
-
-### 3.3 Client-Side Performance & Resiliency with Frontend System Design
-
-#### Comprehensive UI Requirements (Functional & Non-Functional)
-
-**Functional Requirements:**
-- **Demand:** Module & Feature requirements for core shopping experience
-- **Supply:** Module & Feature requirements for platform capabilities
-
-**Non-Functional Requirements:**
-
-| Category | Requirement | Implementation |
-|----------|-------------|----------------|
-| **Mobile / Desktop First** | Responsive design with mobile-first approach | CSS Grid/Flexbox, adaptive breakpoints |
-| **Responsive / Adaptive** | Device detection and appropriate rendering | `viewport-fit`, responsive typography |
-| **Location / Device / Internet** | Context-aware experiences | Geolocation API, offline detection |
-| **Accessibility** | WCAG 2.1 AA compliance | ARIA labels, keyboard navigation, screen reader support |
-| **Asset Optimization** | Efficient delivery of web assets | Image compression, bundling, lazy loading |
-| **Performance** | Core Web Vitals optimization | FCP < 1.8s, LCP < 2.5s, TTI < 3s, CLS < 0.1 |
-| **CSR / SSR** | Hybrid rendering strategy | Next.js with selective hydration |
-| **Authentication / Authorization** | Secure user session management | OAuth 2.0, JWT tokens, role-based access |
-| **Security** | Protection against common threats | CSP, XSS prevention, CSRF tokens |
-| **SEO** | Search engine optimization | Server-side rendering, structured data |
-| **Caching** | Multi-level caching strategy | HTTP cache, service worker, application cache |
-| **Offline Support** | Graceful degradation during connectivity | Service Worker, IndexedDB, queued operations |
-| **Micro Frontend** | Component-based architecture | Module federation, independent deployment |
-| **Logging & Monitoring** | Performance and error tracking | Sentry, LogRocket, custom analytics |
-| **A / B Testing** | Experiment framework | Optimizely, LaunchDarkly, custom A/B logic |
-| **Testing** | Comprehensive testing coverage | Unit, integration, E2E testing |
-| **Internationalisation / Localisation** | Multi-language support | i18next, locale detection |
-| **Versioning** | API and component versioning | Semantic versioning, API versioning |
-| **PWA** | Progressive Web App capabilities | Service Worker, manifest, offline cache |
-| **CI/CD** | Automated deployment pipeline | GitHub Actions, Docker, Kubernetes |
-
-#### Component Architecture Design
-
-**Micro Frontend Architecture:**
-- Module Federation via Webpack Module Federation
-- Independent deployment cycles per domain module
-- Shared dependencies via common vendor bundle
-- Runtime remote loading with error boundaries
-
-**Component Structure:**
-```typescript
-// Core component patterns
-interface BaseComponent {
-  id: string;
-  props: any;
-  state: ComponentState;
-  events: EventBinding[];
-}
-
-// Domain-specific components
-ProductCard, SearchBar, FilterPanel, CartDrawer, 
-CheckoutForm, OrderTracker, ReviewWidget, 
-RecommendationCarousel, ServiceabilityChecker
-```
-
-**Component Communication Patterns:**
-- **Event Bus:** Centralized event system for cross-component communication
-- **State Management:** Centralized store with reactivity (Redux, Zustand, Jotai)
-- **API Integration:** Component-specific API clients with error boundaries
-
-#### Data Model Design
-
-**Unified State Management:**
-```typescript
-interface GlobalStore {
-  user: UserProfile;
-  cart: CartState;
-  products: ProductCatalog;
-  orders: OrderHistory;
-  recommendations: RecommendationEngine;
-  serviceability: ServiceabilityCache;
-  ui: UIState;
-}
-```
-
-**API Data Contracts:**
-```typescript
-// Product API Contract
-type ProductAPI = {
-  getProducts: (filters: ProductFilters) => Promise<ProductConnection>;
-  getProduct: (id: string) => Promise<Product>;
-  searchProducts: (query: string) => Promise<Product[]>;
-};
-
-// Cart API Contract  
-type CartAPI = {
-  addItem: (item: CartItem) => Promise<Cart>;
-  updateItem: (id: string, updates: Partial<CartItem>) => Promise<Cart>;
-  removeItem: (id: string) => Promise<Cart>;
-  applyPromo: (code: string) => Promise<Cart>;
-};
-```
-
-#### API Design
-
-**REST API Design (Chakde System Design Approach):**
-
-**Resource Hierarchy:**
-- `GET /api/v1/products` - Product catalog with pagination and filters
-- `GET /api/v1/products/{id}` - Single product details
-- `GET /api/v1/cart` - User cart state
-- `POST /api/v1/cart/items` - Add item to cart
-- `PUT /api/v1/cart/items/{id}` - Update cart item
-- `DELETE /api/v1/cart/items/{id}` - Remove cart item
-- `POST /api/v1/cart/promo` - Apply promotional code
-- `GET /api/v1/orders` - User order history
-- `GET /api/v1/orders/{id}` - Order details
-- `GET /api/v1/orders/{id}/stream` - Real-time order status (SSE)
-
-**API Response Patterns:**
-```typescript
-// Success response
-{
-  "data": { ... },
-  "meta": {
-    "timestamp": "2026-11-01T08:30:44Z",
-    "requestId": "req_123456",
-    "version": "v1"
-  },
-  "links": {
-    "self": "https://api.platform.com/v1/orders/123",
-    "next": "https://api.platform.com/v1/orders?cursor=abc123"
-  }
-}
-
-// Error response
-{
-  "error": {
-    "code": "VALIDATION_ERROR",
-    "message": "Invalid promo code",
-    "details": [
-      "Promo code expired",
-      "Not applicable to cart contents"
-    ]
-  },
-  "meta": {
-    "timestamp": "2026-11-01T08:30:44Z",
-    "requestId": "req_123457"
-  }
-}
-```
-
-#### Network Communication Protocols
-
-**Data Exchange Formats:**
-
-| Format | Use Case | Benefits | Limitations |
-|--------|----------|----------|-------------|
-| **JSON** | API communication, client-server | Human-readable, widely supported | Larger payload size |
-| **GraphQL** | Complex queries, reduced over-fetching | Precise data selection | Learning curve |
-| **Protocol Buffers** | High-performance services | Compact binary format | Schema evolution |
-
-**Transfer Protocols:**
-
-| Protocol | Primary Use | Characteristics |
-|----------|-------------|----------------|
-| **HTTP/HTTPS** | REST APIs, traditional web | Stateless, widely supported |
-| **WebSocket** | Real-time communication, SSE | Full-duplex, bi-directional |
-| **gRPC** | Internal microservice communication | Typed contracts, streaming |
-| **Server-Sent Events (SSE)** | Real-time updates | Simple, one-way communication |
-
-**Communication Architecture:**
-
-```typescript
-// API client configuration with protocol selection
-interface APIClientConfig {
-  baseURL: string;
-  protocols: CommunicationProtocol[];
-  timeouts: TimeoutConfig;
-  retryPolicy: RetryPolicy;
-  compression: CompressionType;
-}
-
-enum CommunicationProtocol {
-  REST = 'rest',
-  GRAPHQL = 'graphql',
-  WEBSOCKET = 'websocket',
-  SSE = 'sse',
-  GRPC = 'grpc'
-}
-```
-
-#### Performance Optimization (Enhanced)
-
-**Advanced Rendering Strategies:**
-- **Streaming SSR:** Partial hydration with Suspense boundaries
-- **Edge Computing:** Cloudflare Workers for API at edge
-- **Image Optimization:** Next.js Image component with custom loaders
-- **Font Optimization:** Next.js font optimization with subsetting
-
-**Advanced Caching:**
-- **HTTP Cache:** CDN-level caching with invalidation policies
-- **Service Worker:** Offline-first capabilities with background sync
-- **Application Cache:** IndexedDB-based persistent storage
-- **Session Cache:** In-memory caching with TTL management
-
-**Network Optimization:**
-```typescript
-// Advanced network configuration
-const networkConfig = {
-  // Connection optimization
-  connectionPoolSize: 50,
-  keepAlive: true,
-  timeout: 30000,
-  
-  // Request optimization
-  maxConcurrentRequests: 6,
-  requestDeduplication: true,
-  batchRequests: true,
-  
-  // Response optimization
-  compression: 'brotli',
-  cacheStrategy: 'stale-while-revalidate',
-  offlineFallback: true,
-  
-  // Monitoring
-  performanceTracking: true,
-  errorTracking: true,
-  analytics: true
-};
-```
-
-#### Accessibility & Resiliency
-
-**Accessibility Implementation:**
-- ARIA labels and roles for screen reader compatibility
-- Keyboard navigation support (Tab, Enter, Space, Escape)
-- High contrast mode and reduced motion preferences
-- Focus management for modal dialogs and overlays
-
-**Resilience Patterns:**
-- **Fallback Components:** Graceful degradation for failed API calls
-- **Skeleton Loading:** Visual loading states while data fetches
-- **Error Boundaries:** Component-level error isolation and recovery
-- **Offline Detection:** Network status monitoring and offline queue management
-
-#### Monitoring & Analytics
-
-**Performance Monitoring:**
-- Core Web Vitals tracking (FCP, LCP, TTI, CLS)
-- Custom metrics for business-critical operations
-- Real-time performance dashboards
-- Performance budgeting and alerts
-
-**Error Monitoring:**
-- Centralized error logging with correlation IDs
-- Performance error tracking and alerting
-- User behavior analytics
-- Automatic error reporting and grouping
-
-#### CI/CD Pipeline
-
-**Automated Testing:**
-- Unit tests with Jest/Mocha
-- Integration tests with Cypress/Supertest
-- Visual regression tests with Chromatic
-- Performance testing with Lighthouse CI
-
-**Deployment Automation:**
-- GitHub Actions for CI/CD pipeline
-- Containerized deployments with Docker/Kubernetes
-- Blue-green deployments with traffic shifting
-- Automated rollback on failure detection
-
-#### Internationalisation & Localisation
-
-**Multi-Language Support:**
-```typescript
-// i18n configuration
-const i18nConfig = {
-  defaultLocale: 'en',
-  supportedLocales: ['en', 'es', 'fr', 'de', 'it', 'pt'],
-  
-  // Regional formatting
-  formats: {
-    date: 'yyyy-MM-dd',
-    time: 'HH:mm:ss',
-    currency: 'USD',
-    number: { style: 'decimal' }
-  },
-  
-  // Translation loading
-  preload: true,
-  fallbackLng: 'en',
-  detection: {
-    order: ['localStorage', 'navigator', 'htmlTag'],
-    caches: ['localStorage']
-  }
-};
-```
-
-#### Security & Compliance
-
-**Authentication & Authorization:**
-- OAuth 2.0 with OpenID Connect
-- Role-based access control (RBAC)
-- Multi-factor authentication support
-- Session management with secure cookies
-
-**Data Protection:**
-- GDPR compliance for user data
-- PCI DSS for payment processing
-- Secure configuration management
-- Encryption for data in transit and at rest
-
-#### Versioning Strategy
-
-**API Versioning:**
-- URL-based versioning (`/api/v1/`, `/api/v2/`)
-- Semantic versioning for releases
-- Backward compatibility guarantees
-- Deprecation policies for older versions
-
-**Component Versioning:**
-- Component library versioning
-- Dependency management with semantic versioning
-- Breaking change notifications
-- Rollback capabilities for critical updates
-
-#### Progressive Web App (PWA) Features
-
-**Offline Capabilities:**
-- Service Worker for offline operation
-- IndexedDB for local data storage
-- Background sync for queued operations
-- Offline fallback pages and error states
-
-**Performance Optimizations:**
-- App manifest for home screen installation
-- Splash screen for app loading
-- Push notifications for updates
-- Battery optimization features
+### 2.3 Comprehensive Functional Requirements (PRD Specification)
+
+| Requirement ID | Module / Domain | Priority | Description | Acceptance Criteria |
+| :--- | :--- | :--- | :--- | :--- |
+| **FR-CAT-01** | Product Catalog | P0 | Full-text and faceted search with semantic understanding and spell check. | Query latency $\le 80\text{ ms}$ for 95% of queries over 10M SKUs; fuzzy matching handles 2-character typos. |
+| **FR-INV-01** | Item / Inventory | P0 | Real-time Available-to-Promise (ATP) tracking per SKU and regional warehouse. | Stock reservations expire deterministically after 10 minutes if uncommitted; zero phantom overselling under 10k QPS. |
+| **FR-CRT-01** | Cart Service | P0 | Distributed cart session supporting guest users and authenticated merge. | Guest cart automatically merged with user cart on login without dropping items; Redis persistence with 30-day TTL. |
+| **FR-ORD-01** | Order Processing | P0 | Orchestrated Saga execution for multi-step order lifecycle state transitions. | State machine persists transitions in PostgreSQL with optimistic locking; automatic compensation rollback on failure. |
+| **FR-PAY-01** | Payment Service | P0 | PCI DSS SAQ-A compliant multi-provider payment processing with double-entry ledger. | Zero plain-text card storage; idempotent webhook processing; double-entry ledger verification prevents imbalanced settlements. |
+| **FR-OFF-01** | Offers Service | P1 | Dynamic rule-based discount evaluation with global usage ceilings. | Support cart-level, SKU-level, and tier-based discounts; atomic usage counters prevent coupon over-redemption. |
+| **FR-SRV-01** | Serviceability | P1 | Real-time delivery availability, shipping charges, and SLA calculation per pincode. | Evaluates vendor warehouse proximity, carrier constraints (weight/hazmat), and cutoff times in $\le 50\text{ ms}$. |
+| **FR-REV-01** | Review & Ratings | P1 | Verified-buyer review submissions with abuse filtering and Bayesian scoring. | Submissions restricted to users with `DELIVERED` status for that SKU; asynchronous score aggregation to Product Catalog. |
+| **FR-REC-01** | Recommendations | P2 | Personalized item recommendations ("Frequently Bought Together", "Trending"). | Ingests clickstream and purchase events from Kafka; serves inference rankings in $\le 60\text{ ms}$ with heuristic fallback. |
+| **FR-NOT-01** | Notification | P1 | Multi-channel delivery (Email, SMS, WhatsApp, WebPush) with priority queuing. | P0 notifications (OTP, Order Placed) delivered to vendor provider within 3 seconds of event ingestion. |
+| **FR-ARC-01** | Data Archival | P2 | Automated cold-storage partitioning for orders and audits older than 90 days. | Regulatory 7-year audit retention compliance; support on-demand historical queries via Trino/Athena; GDPR data erasure. |
+| **FR-USR-01** | User & IAM | P0 | Role-based identity management, OAuth2/OIDC token issuance, and address book. | Token validation via JWKS in sub-5ms at API Gateway; MFA enforcement for merchant and administrative accounts. |
 
 ---
 
-This comprehensive Layer 3 documentation now includes all the UI architecture requirements specified in your checklist, providing a complete specification for frontend system design, implementation, and deployment for the e-commerce microservices platform.
+### 2.4 Distributed Failure Modes & Edge Case Matrix
+
+| Scenario / Failure Mode | Affected Microservices | Root Cause Trigger | System Mitigation & Recovery Strategy | Client / UX Manifestation |
+| :--- | :--- | :--- | :--- | :--- |
+| **Flash Sale Stock Exhaustion** | Cart $\rightarrow$ Inventory $\rightarrow$ Order | 50,000 users attempting to buy 1,000 units simultaneously. | Redis Lua script executes atomic test-and-decrement. When counter hits 0, subsequent requests are rejected at cache tier without hitting RDBMS. | Client displays "Sold Out" badge; button disabled; user invited to join "Waitlist" via Notification Service. |
+| **Payment Success but Order Timeout** | Payment $\rightarrow$ Order Service | Network partition between Payment Webhook and Order Service after card authorization. | Idempotent webhook receiver writes to Payment DB and publishes to Kafka. Order Service reconciles missing state via polling consumer or CDC replay. | Buyer sees "Payment Received — Securing Your Order" screen with auto-polling SSE stream; no duplicate charge. |
+| **Payment 3DS Abandonment** | Payment $\rightarrow$ Inventory $\rightarrow$ Order | Buyer closes browser during banking OTP / 3DS authentication. | Redis reservation token expires at 600s TTL. Scheduled Reaper job or Redis key-expiration hook returns units to ATP pool. Order marked `ABANDONED`. | Cart retains items with notification: "Stock reservation expired. Click checkout to re-verify availability." |
+| **Serviceability Timeout** | API Gateway $\rightarrow$ Serviceability | Logistics database latency spike exceeds 100ms threshold. | Resilience4j circuit breaker trips to OPEN. Gateway executes fallback to regional pincode cache (stale-while-revalidate). | Client displays: "Estimated Delivery: 3-5 Days (Live verification pending)." |
+| **Double Webhook Delivery** | Payment Gateway $\rightarrow$ Payment | External payment gateway (Stripe/Adyen) delivers duplicate webhooks due to slow ACK. | Unique constraint on `payment_transactions.provider_reference`. Subsequent webhook hits idempotent deduplication check and returns `200 OK` immediately. | Silent backend deduplication; user experiences zero impact or double-allocation. |
+| **Notification Provider Outage** | Order $\rightarrow$ Notification Engine | Third-party SMS/Email gateway experiences 5xx failure. | Notification Service queues event in dead-letter retry topic with exponential jitter; falls back to secondary SMS carrier (e.g., Twilio $\rightarrow$ AWS SNS). | In-app notification center displays order confirmation immediately; SMS arrives with slight delay. |
+
+---
+
+## LAYER 3: PRODUCTION FRONTEND & CLIENT ARCHITECTURE
+
+### 3.1 RADIO Framework Implementation for E-Commerce
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                              RADIO FRAMEWORK ARCHITECTURE                              │
+├─────────────────────┬─────────────────────┬────────────────────┬───────────────────────┤
+│ R - Requirements    │ A - Architecture    │ D - Data Models    │ I - Interfaces / APIs │
+│ • Core Web Vitals   │ • Next.js 14+ SSR   │ • Normalised Store │ • Typed REST / JSON   │
+│ • SEO Maximisation  │ • Module Federation │ • Optimistic Carts │ • SSE Order Stream    │
+│ • WCAG 2.1 AAA      │ • Edge Cloudflare   │ • Offline Queues   │ • GraphQL BFF Aggreg  │
+└─────────────────────┴─────────────────────┴────────────────────┴───────────────────────┘
+```
+
+#### R — Requirements & Constraints
+* **Performance Budget:** First Contentful Paint (FCP) $\le 1.2\text{s}$, Largest Contentful Paint (LCP) $\le 2.0\text{s}$, Cumulative Layout Shift (CLS) $\le 0.05$, Interaction to Next Paint (INP) $\le 150\text{ms}$.
+* **Device Spectrum:** Responsive web (Mobile/Tablet/Desktop) + Native iOS/Android apps sharing core API contracts.
+* **SEO Constraints:** 100% server-renderable HTML for all public catalog, brand, and category pages with dynamic OpenGraph meta tags and Schema.org microdata.
+
+#### A — Architecture & Hybrid Rendering Strategy
+* **Catalog & Landing Pages:** Server-Side Rendering (SSR) with Incremental Static Regeneration (ISR) using Next.js 14+ App Router. Catalog pages revalidate every 60 seconds.
+* **Cart, Checkout & User Dashboard:** Client-Side Rendering (CSR) protected by authenticated sessions and edge-routed to nearest Cloudflare Points of Presence (PoP).
+* **Micro-Frontend Modularization:** Core domains partitioned via Webpack Module Federation:
+  * `catalog-mfe`: Search bar, filter facets, product display cards.
+  * `checkout-mfe`: Cart drawer, promo code applicator, address selector, payment container.
+  * `account-mfe`: Order history, tracking timeline, reviews, returns management.
+
+#### D — Client State Architecture & Normalized Data Stores
+* Local client cache partitioned into:
+  1. **Server State (TanStack Query):** Product queries, search results, stock status, cached with strict TTLs and stale-while-revalidate policies.
+  2. **Session / Client State (Zustand):** Local cart modifications, drawer toggles, active filter selections.
+  3. **Offline Queue (IndexedDB):** Queued offline mutations (e.g., wishlist additions, unsent analytics events).
+
+#### I — Interface Protocols & Aggregation
+* **Primary Interconnect:** RESTful HTTPS JSON APIs mediated by Spring Cloud Gateway / Envoy.
+* **Complex Page Aggregation:** Backend-for-Frontend (BFF) aggregation layer combining Product Details, Live Stock, Reviews, and Related Items into a single payload.
+* **Live Streams:** Server-Sent Events (SSE) on `/api/v1/orders/{orderId}/timeline` for real-time order status tracking.
+
+#### O — Edge & Client Optimizations
+* **Image Transformation Pipeline:** Dynamic WebP/AVIF generation with `srcset` served from edge CDN with 30-day immutability headers.
+* **Resource Prioritization:** Critical CSS inlined; non-critical script bundles deferred; DNS prefetch and preconnect for CDN and Payment Gateway origins.
+
+---
+
+### 3.2 6-State Component Design Contract
+
+Every user-facing component adheres to a deterministic 6-state finite state machine in TypeScript:
+
+```typescript
+export type AsyncState<TData, TError = ApiError> =
+  | { status: 'IDLE'; data: null; error: null }
+  | { status: 'LOADING'; data: TData | null; error: null }
+  | { status: 'SUCCESS'; data: TData; error: null }
+  | { status: 'ERROR'; data: TData | null; error: TError }
+  | { status: 'OPTIMISTIC'; data: TData; error: null; pendingMutationId: string }
+  | { status: 'OFFLINE_QUEUED'; data: TData | null; error: null; queueReference: string };
+
+export interface ApiError {
+  code: string;
+  message: string;
+  fieldErrors?: Record<string, string>;
+  requestId: string;
+  timestamp: string;
+}
+```
+
+#### Deterministic State Transition Matrix for Cart Modification
+
+| Trigger / User Action | Current State | Target State | UI Behavior & DOM Updates | Network & Storage Action |
+| :--- | :--- | :--- | :--- | :--- |
+| Initial Page Load | `IDLE` | `LOADING` | Skeleton loader rendered in cart sidebar. | Fetch `GET /api/v1/cart` via TanStack Query. |
+| Fetch Successful | `LOADING` | `SUCCESS` | Cart items, prices, and checkout button activated. | Hydrate in-memory Zustand store and localStorage. |
+| Network Disconnected | `SUCCESS` | `OFFLINE_QUEUED` | Offline indicator shown; optimistic item update retained. | Mutation stored in IndexedDB offline write-queue. |
+| User Clicks "Add Item" | `SUCCESS` | `OPTIMISTIC` | Badge counter increments immediately; subtotal updates. | Dispatches `POST /api/v1/cart/items` with rollback snapshot. |
+| Server Returns 200 OK | `OPTIMISTIC` | `SUCCESS` | Subtle checkmark animation; pending mutation cleared. | Overwrite local state with authoritative server cart payload. |
+| Server Returns 409 Conflict | `OPTIMISTIC` | `ERROR` | Revert badge counter; toast: "Insufficient stock for SKU". | Rollback to pre-mutation snapshot; invalidate query cache. |
+
+---
+
+### 3.3 Production Frontend Technical Requirements Matrix
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                              FRONTEND TECHNICAL CAPABILITIES                           │
+├────────────────────────────┬─────────────────────────────┬─────────────────────────────┤
+│ Performance & Rendering    │ Security & Resiliency       │ Accessibility & Inclusivity │
+│ • Next.js App Router (SSR) │ • CSP Level 3 Strict        │ • WCAG 2.1 AAA Compliant    │
+│ • WebP / AVIF Responsive   │ • Anti-CSRF Double-Submit   │ • ARIA Live Regions         │
+│ • Brotli Compression       │ • Subresource Integrity SRI │ • Full Keyboard Navigability│
+│ • Suspense Streaming       │ • Error Boundary Sandboxing │ • Screen Reader Friendly    │
+└────────────────────────────┴─────────────────────────────┴─────────────────────────────┘
+```
+
+* **Core Web Vitals Enforcement:** Synthetic Lighthouse CI integrated into GitHub Actions rejecting PRs with performance scores $< 90$.
+* **Accessibility (a11y):** Full semantic HTML5; ARIA live regions for cart updates (`aria-live="polite"`); focus trapping within modals; color contrast ratio $\ge 7:1$.
+* **Progressive Web App (PWA):** Workbox Service Worker caching static shells; background sync for offline analytics; Web App Manifest enabling standalone mobile installation.
+* **Security Measures:** Strict Content Security Policy (`default-src 'self'`); anti-CSRF tokens embedded in mutating requests; XSS sanitization via DOMPurify.
 
 ---
 
 ## LAYER 4: MACHINE CODING & LOW-LEVEL COMPONENT DESIGN
 
-### 4.1 Distributed Design Patterns
+### 4.1 Core Distributed Design Patterns
 
-#### Pattern 1: Saga Pattern (Choreography-Based) — Distributed Order Transaction
+#### 4.1.1 Orchestrated Saga Pattern — Order Fulfillment State Machine
+Choreographed sagas become unmaintainable as domain complexity grows. This platform uses an **Orchestrated Saga Pattern** where the `Order Service` serves as the central stateful orchestrator.
 
-Used for: Order placement spanning Order → Item (stock reservation) → Payment → Order (confirmation).
-
-**Execution Flow:**
-
+```mermaid
+stateDiagram-v2
+    [*] --> CREATED
+    CREATED --> INVENTORY_RESERVED: Step 1: Reserve Stock (Item Service)
+    CREATED --> FAILED: Stock Unavailable
+    
+    INVENTORY_RESERVED --> PROMO_APPLIED: Step 2: Apply Promo (Offers Service)
+    INVENTORY_RESERVED --> CANCELLED: Compensation: Release Stock
+    
+    PROMO_APPLIED --> PAYMENT_PENDING: Step 3: Create Payment Intent (Payment Service)
+    
+    PAYMENT_PENDING --> ORDER_CONFIRMED: Step 4: Capture Payment (Payment Webhook)
+    PAYMENT_PENDING --> PAYMENT_FAILED: Payment Declined / Timeout
+    
+    PAYMENT_FAILED --> CANCELLED: Compensation: Release Promo & Release Stock
+    
+    ORDER_CONFIRMED --> ALLOCATED: Step 5: Warehouse Allocation
+    ALLOCATED --> SHIPPED: Step 6: Carrier Handover
+    SHIPPED --> DELIVERED: Step 7: Final Delivery
+    
+    ORDER_CONFIRMED --> REFUNDED: Post-Confirm Cancellation
+    REFUNDED --> CANCELLED: Compensation: Reverse Payment Ledger & Return Stock
 ```
-Buyer → Order Service: POST /orders (PENDING_PAYMENT)
-Order Service → Item Service: Reserve stock (Saga step 1)
-Item Service → Order Service: Stock reserved event
-Order Service → Payment Service: Create payment intent (Saga step 2)
-Payment Service → Order Service: Payment success webhook
-Order Service → Item Service: Confirm reservation / release (Saga step 3)
-Order Service → Order Service: Transition order to CONFIRMED
-Order Service → Notification Service: Send confirmation (Outbox pattern)
+
+* **Compensation Logic Guarantee:** Every forward step has an idempotent compensating action:
+  * `ReserveStock` $\rightarrow$ `Compensate: ReleaseStockReservation`
+  * `ApplyPromo` $\rightarrow$ `Compensate: UnlockPromoCode`
+  * `AuthorizePayment` $\rightarrow$ `Compensate: VoidPaymentAuthorization / IssueRefund`
+
+#### 4.1.2 Transactional Outbox Pattern with Debezium CDC
+To prevent distributed dual-write inconsistencies between PostgreSQL and Apache Kafka:
+1. Every domain service writes its domain entity state change and an outbox event record within the **same local ACID database transaction**.
+2. Debezium Change Data Capture (CDC) monitors the PostgreSQL Write-Ahead Log (WAL) and publishes events to Kafka with zero application-level dual-write vulnerability.
+
+```sql
+-- Outbox Table Schema in PostgreSQL (Partitioned by Month)
+CREATE TABLE transactional_outbox (
+    event_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    aggregate_type VARCHAR(64) NOT NULL,
+    aggregate_id VARCHAR(64) NOT NULL,
+    event_type VARCHAR(64) NOT NULL,
+    payload JSONB NOT NULL,
+    trace_context JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    processed_at TIMESTAMPTZ NULL
+) PARTITION BY RANGE (created_at);
 ```
 
-**Compensation Transactions (Rollback):**
-- If Payment fails: Order Service sends `ReleaseStock` to Item Service, marks order `CANCELLED`.
-- If Item Service unavailable during confirmation: Order retries with exponential backoff; after max retries, marks order `PAYMENT_RECEIVED_STOCK_PENDING` for manual ops review.
+#### 4.1.3 High-Concurrency Atomic Flash-Sale Stock Engine
+To achieve sub-5ms stock reservations under extreme concurrency without relational row deadlocks, stock counters are decremented atomically using a Redis Lua script:
 
-#### Pattern 2: Outbox Pattern — Reliable Event Publishing
+```lua
+-- Atomic Stock Reservation Lua Script (Executed on Redis Shard)
+-- KEYS[1]: stock:counter:{sku_id}
+-- KEYS[2]: stock:leases:{order_id}
+-- ARGV[1]: requested_quantity
+-- ARGV[2]: order_id
+-- ARGV[3]: lease_ttl_seconds
 
-Used for: Order Service emitting `OrderConfirmed` to Notification, Archival, and Recommendations services without distributed transactions.
+local current_stock = redis.call('GET', KEYS[1])
+if not current_stock then
+    return -1 -- SKU not found
+end
 
-**Execution:**
-1. Order Service writes `Order` row and `OutboxEvent` row in the **same local transaction** (PostgreSQL).
-2. A Change Data Capture (Debezium) or polling relay reads `OutboxEvent` table and publishes to Kafka topic `order.events`.
-3. Notification, Archival, and Recommendations services consume from Kafka independently.
-4. After successful consumption, OutboxEvent is marked `PROCESSED` and purged after 7 days.
+local available = tonumber(current_stock)
+local required = tonumber(ARGV[1])
 
-**Benefit:** No dual-write problem. If Kafka is down, events accumulate in Outbox table and are published on recovery.
-
-#### Pattern 3: Circuit Breaker — Resilient Inter-Service Calls
-
-Used for: Cart Service calling Item Service for stock verification; Order Service calling Offers Service for discount validation.
-
-**States:** CLOSED (normal) → OPEN (failure threshold reached, e.g., 50% failures over 10s) → HALF-OPEN (trial request after cool-down).
-
-**Fallback:** Cart Service returns cached stock status or allows cart addition with "Stock verification pending" warning.
+if available >= required then
+    -- Atomically decrement stock counter
+    redis.call('DECRBY', KEYS[1], required)
+    -- Record reservation lease with TTL
+    redis.call('HSET', KEYS[2], 'sku', KEYS[1], 'qty', required, 'reserved_at', redis.call('TIME')[1])
+    redis.call('EXPIRE', KEYS[2], tonumber(ARGV[3]))
+    return 1 -- Reservation Successful
+else
+    return 0 -- Insufficient Stock
+end
+```
 
 ---
 
-### 4.2 Inter-Service API Contracts
+### 4.2 Protobuf & Inter-Service gRPC Contracts
 
-#### Contract A: Order → Payment (Payment Initiation)
+For latency-critical communication between the Order Service and Inventory Service, binary gRPC over HTTP/2 is utilized in place of REST:
 
-**Request:** `POST https://payment.platform.com/v1/payments/intents`
+```protobuf
+syntax = "proto3";
+
+package com.platform.inventory.v1;
+
+option java_multiple_files = true;
+option java_package = "com.platform.inventory.v1";
+
+service InventoryService {
+  rpc ReserveStock (ReserveStockRequest) returns (ReserveStockResponse);
+  rpc CommitReservation (CommitReservationRequest) returns (CommitReservationResponse);
+  rpc ReleaseReservation (ReleaseReservationRequest) returns (ReleaseReservationResponse);
+  rpc CheckAvailability (CheckAvailabilityRequest) returns (CheckAvailabilityResponse);
+}
+
+message StockItemRequest {
+  string sku = 1;
+  int32 quantity = 2;
+  string warehouse_id = 3;
+}
+
+message ReserveStockRequest {
+  string order_id = 1;
+  string customer_id = 2;
+  repeated StockItemRequest items = 3;
+  int32 reservation_ttl_seconds = 4;
+  string idempotency_key = 5;
+}
+
+message ReserveStockResponse {
+  enum ReservationStatus {
+    RESERVATION_STATUS_UNSPECIFIED = 0;
+    SUCCESS = 1;
+    INSUFFICIENT_STOCK = 2;
+    SKU_NOT_FOUND = 3;
+    DUPLICATE_IDEMPOTENT_REQUEST = 4;
+  }
+  ReservationStatus status = 1;
+  string reservation_id = 2;
+  int64 expires_at_epoch_ms = 3;
+  string error_message = 4;
+}
+
+message CommitReservationRequest {
+  string reservation_id = 1;
+  string order_id = 2;
+}
+
+message CommitReservationResponse {
+  bool committed = 1;
+  int64 committed_at_epoch_ms = 2;
+}
+
+message ReleaseReservationRequest {
+  string reservation_id = 1;
+  string order_id = 2;
+  string cancellation_reason = 3;
+}
+
+message ReleaseReservationResponse {
+  bool released = 1;
+  int32 restored_quantity = 2;
+}
+
+message CheckAvailabilityRequest {
+  repeated string skus = 1;
+  string destination_pincode = 2;
+}
+
+message StockAvailability {
+  string sku = 1;
+  int32 available_to_promise = 2;
+  bool is_serviceable = 3;
+  int32 estimated_delivery_days = 4;
+}
+
+message CheckAvailabilityResponse {
+  repeated StockAvailability items = 1;
+}
+```
+
+---
+
+### 4.3 Kafka CloudEvents Specification
+
+All asynchronous events adhere to the CNCF CloudEvents standard formatted in JSON:
+
+#### `OrderConfirmedEvent` Specification (`order.events` topic)
+
 ```json
 {
-  "orderId": "ord_987654321",
-  "customerId": "cust_555666777",
-  "amount": 12999,
-  "currency": "INR",
-  "paymentMethod": "card",
-  "returnUrl": "https://platform.com/orders/ord_987654321/return",
-  "webhookUrl": "https://order.platform.com/v1/webhooks/payment",
-  "metadata": {
-    "cartId": "cart_111222333",
-    "promoCode": "DIWALI20"
+  "specversion": "1.0",
+  "type": "com.platform.order.confirmed.v1",
+  "source": "/services/order-service/cluster-prod-01",
+  "id": "evt_9c8b7a6d-4e3f-4a1b-8c2d-1e0f9a8b7c6d",
+  "time": "2026-11-01T08:30:00Z",
+  "datacontenttype": "application/json",
+  "dataschema": "https://schema.platform.com/events/order-confirmed-v1.json",
+  "data": {
+    "orderId": "ord_8829104",
+    "customerId": "cust_440192",
+    "orderStatus": "CONFIRMED",
+    "currency": "INR",
+    "financialSummary": {
+      "subtotal": 12999.00,
+      "discountAmount": 1000.00,
+      "shippingFee": 0.00,
+      "taxAmount": 2159.82,
+      "grandTotal": 14158.82
+    },
+    "paymentDetails": {
+      "paymentTransactionId": "txn_pay_7721049",
+      "paymentMethod": "UPI",
+      "gatewayProvider": "RAZORPAY"
+    },
+    "lineItems": [
+      {
+        "sku": "SKU-HEADPHONE-PRO-BLK",
+        "quantity": 1,
+        "unitPrice": 12999.00,
+        "vendorId": "vnd_tech_direct",
+        "warehouseId": "wh_delhi_hub_01"
+      }
+    ],
+    "shippingAddress": {
+      "addressId": "addr_991823",
+      "pincode": "110001",
+      "city": "New Delhi",
+      "state": "Delhi",
+      "country": "IN"
+    }
   }
 }
 ```
 
-**Response (201 Created):**
-```json
-{
-  "paymentId": "pay_888999000",
-  "orderId": "ord_987654321",
-  "status": "PENDING",
-  "amount": 12999,
-  "currency": "INR",
-  "clientSecret": "pi_3QxYz_secret_12345",
-  "expiresAt": "2026-11-01T08:30:44Z",
-  "createdAt": "2026-11-01T07:30:44Z"
-}
-```
-
-**Response (400 Bad Request - Invalid promo):**
-```json
-{
-  "error": "INVALID_PROMO",
-  "message": "Promo code DIWALI20 has expired or is not applicable to this order",
-  "code": 400
-}
-```
-
-#### Contract B: Order → Item/Inventory (Stock Reservation & Release)
-
-**Request A: Reserve Stock** `POST https://item.platform.com/v1/inventory/reserve`
-```json
-{
-  "orderId": "ord_987654321",
-  "items": [
-    {
-      "sku": "SKU-WHP-001",
-      "quantity": 1,
-      "reservationTtlSeconds": 900
-    }
-  ],
-  "reservationId": "res_777888999"
-}
-```
-
-**Response A (200 OK):**
-```json
-{
-  "reservationId": "res_777888999",
-  "orderId": "ord_987654321",
-  "status": "RESERVED",
-  "items": [
-    {
-      "sku": "SKU-WHP-001",
-      "quantity": 1,
-      "reservedAt": "2026-11-01T07:31:00Z",
-      "expiresAt": "2026-11-01T07:46:00Z"
-    }
-  ]
-}
-```
-
-**Response A (409 Conflict - Insufficient stock):**
-```json
-{
-  "error": "INSUFFICIENT_STOCK",
-  "message": "Only 2 units available for SKU-WHP-001, requested 1",
-  "availableQuantity": 2,
-  "code": 409
-}
-```
-
-**Request B: Confirm/Release Stock** `POST https://item.platform.com/v1/inventory/confirm`
-```json
-{
-  "reservationId": "res_777888999",
-  "action": "CONFIRM"
-}
-```
-
-**Request C: Release Stock** `POST https://item.platform.com/v1/inventory/release`
-```json
-{
-  "reservationId": "res_777888999",
-  "action": "RELEASE",
-  "reason": "ORDER_CANCELLED"
-}
-```
-
-**Response (200 OK):**
-```json
-{
-  "reservationId": "res_777888999",
-  "action": "CONFIRMED",
-  "items": [
-    {
-      "sku": "SKU-WHP-001",
-      "quantity": 1,
-      "status": "CONFIRMED"
-    }
-  ]
-}
-```
-
 ---
 
-### 4.3 Data Models & Domain Interfaces
+### 4.4 Production Kotlin Domain Entities
 
-#### Kotlin — Order Domain Entity
+#### Order Domain Aggregate Root (Kotlin + Spring Data JPA)
 
 ```kotlin
 package com.platform.order.domain
 
+import jakarta.persistence.*
+import org.hibernate.annotations.JdbcTypeCode
+import org.hibernate.type.SqlTypes
+import java.math.BigDecimal
 import java.time.Instant
 import java.util.UUID
 
 enum class OrderStatus {
-    PENDING_PAYMENT,
-    PAYMENT_RECEIVED,
+    CREATED,
+    INVENTORY_RESERVED,
+    PAYMENT_PENDING,
     CONFIRMED,
+    ALLOCATED,
     SHIPPED,
     DELIVERED,
     CANCELLED,
     REFUNDED
 }
 
-data class OrderItem(
-    val sku: String,
-    val productId: String,
-    val quantity: Int,
-    val unitPrice: BigDecimal,
-    val totalPrice: BigDecimal
+@Entity
+@Table(
+    name = "orders",
+    indexes = [
+        Index(name = "idx_orders_customer", columnList = "customer_id"),
+        Index(name = "idx_orders_status", columnList = "order_status"),
+        Index(name = "idx_orders_created_at", columnList = "created_at")
+    ]
 )
+class Order(
+    @Id
+    @Column(name = "order_id", length = 64, nullable = false, updatable = false)
+    val id: String = "ord_${UUID.randomUUID()}",
 
-data class Order(
-    val id: String = UUID.randomUUID().toString(),
+    @Column(name = "customer_id", length = 64, nullable = false)
     val customerId: String,
-    val status: OrderStatus,
-    val items: List<OrderItem>,
-    val subtotal: BigDecimal,
-    val taxAmount: BigDecimal,
-    val shippingAmount: BigDecimal,
-    val discountAmount: BigDecimal,
-    val grandTotal: BigDecimal,
-    val currency: String = "INR",
-    val paymentId: String? = null,
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "order_status", length = 32, nullable = false)
+    var status: OrderStatus = OrderStatus.CREATED,
+
+    @OneToMany(cascade = [CascadeType.ALL], orphanRemoval = true, fetch = FetchType.EAGER)
+    @JoinColumn(name = "order_id", nullable = false)
+    val lineItems: MutableList<OrderLineItem> = mutableListOf(),
+
+    @Embedded
+    var financialSummary: OrderFinancialSummary,
+
+    @Column(name = "reservation_id", length = 64)
+    var reservationId: String? = null,
+
+    @Column(name = "payment_intent_id", length = 64)
+    var paymentIntentId: String? = null,
+
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "shipping_snapshot", columnDefinition = "jsonb", nullable = false)
+    val shippingSnapshot: ShippingAddressSnapshot,
+
+    @Version
+    @Column(name = "aggregate_version", nullable = false)
+    var version: Long = 0,
+
+    @Column(name = "created_at", nullable = false, updatable = false)
     val createdAt: Instant = Instant.now(),
-    val updatedAt: Instant = Instant.now(),
-    val version: Long = 0  // Optimistic locking
+
+    @Column(name = "updated_at", nullable = false)
+    var updatedAt: Instant = Instant.now()
+) {
+    fun confirmPayment(transactionId: String) {
+        check(this.status == OrderStatus.PAYMENT_PENDING || this.status == OrderStatus.INVENTORY_RESERVED) {
+            "Cannot transition order $id to CONFIRMED from state ${this.status}"
+        }
+        this.paymentIntentId = transactionId
+        this.status = OrderStatus.CONFIRMED
+        this.updatedAt = Instant.now()
+    }
+
+    fun markCancelled(reason: String) {
+        check(this.status != OrderStatus.DELIVERED && this.status != OrderStatus.SHIPPED) {
+            "Cannot cancel order $id when already in state ${this.status}"
+        }
+        this.status = OrderStatus.CANCELLED
+        this.updatedAt = Instant.now()
+    }
+}
+
+@Entity
+@Table(name = "order_line_items")
+class OrderLineItem(
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    val id: Long = 0,
+
+    @Column(name = "sku", length = 64, nullable = false)
+    val sku: String,
+
+    @Column(name = "product_name", length = 255, nullable = false)
+    val productName: String,
+
+    @Column(name = "quantity", nullable = false)
+    val quantity: Int,
+
+    @Column(name = "unit_price", precision = 12, scale = 2, nullable = false)
+    val unitPrice: BigDecimal,
+
+    @Column(name = "total_price", precision = 12, scale = 2, nullable = false)
+    val totalPrice: BigDecimal,
+
+    @Column(name = "vendor_id", length = 64, nullable = false)
+    val vendorId: String
 )
-```
 
-#### TypeScript — User Domain Interface
+@Embeddable
+data class OrderFinancialSummary(
+    @Column(name = "subtotal_amount", precision = 12, scale = 2, nullable = false)
+    val subtotal: BigDecimal,
 
-```typescript
-export interface User {
-  id: string;
-  email: string;
-  phone: string;
-  firstName: string;
-  lastName: string;
-  role: 'CUSTOMER' | 'VENDOR' | 'ADMIN';
-  subscriptionTier: 'FREE' | 'STARTER' | 'GROWTH' | 'ENTERPRISE';
-  addresses: Address[];
-  defaultAddressId: string | null;
-  emailVerified: boolean;
-  phoneVerified: boolean;
-  createdAt: string;
-  updatedAt: string;
-}
+    @Column(name = "discount_amount", precision = 12, scale = 2, nullable = false)
+    val discount: BigDecimal,
 
-export interface Address {
-  id: string;
-  type: 'HOME' | 'WORK' | 'OTHER';
-  street: string;
-  city: string;
-  state: string;
-  pincode: string;
-  country: string;
-  isDefault: boolean;
-}
+    @Column(name = "tax_amount", precision = 12, scale = 2, nullable = false)
+    val tax: BigDecimal,
 
-export interface UserSession {
-  accessToken: string;
-  refreshToken: string;
-  expiresAt: string;
-  user: User;
-}
-```
+    @Column(name = "shipping_fee", precision = 12, scale = 2, nullable = false)
+    val shippingFee: BigDecimal,
 
-#### Kotlin — User Domain Entity
+    @Column(name = "grand_total", precision = 12, scale = 2, nullable = false)
+    val grandTotal: BigDecimal,
 
-```kotlin
-package com.platform.user.domain
+    @Column(name = "currency", length = 3, nullable = false)
+    val currency: String = "INR"
+)
 
-import java.time.Instant
-import java.util.UUID
-
-enum class UserRole { CUSTOMER, VENDOR, ADMIN }
-enum class SubscriptionTier { FREE, STARTER, GROWTH, ENTERPRISE }
-
-data class Address(
-    val id: String = UUID.randomUUID().toString(),
-    val type: String,
+data class ShippingAddressSnapshot(
+    val recipientName: String,
     val street: String,
     val city: String,
     val state: String,
     val pincode: String,
-    val country: String = "IN",
-    val isDefault: Boolean = false
-)
-
-data class User(
-    val id: String = UUID.randomUUID().toString(),
-    val email: String,
-    val phone: String,
-    val firstName: String,
-    val lastName: String,
-    val role: UserRole = UserRole.CUSTOMER,
-    val subscriptionTier: SubscriptionTier = SubscriptionTier.FREE,
-    val addresses: List<Address> = emptyList(),
-    val defaultAddressId: String? = null,
-    val emailVerified: Boolean = false,
-    val phoneVerified: Boolean = false,
-    val createdAt: Instant = Instant.now(),
-    val updatedAt: Instant = Instant.now()
+    val phone: String
 )
 ```
 
 ---
 
-### 4.4 Complex Logic Breakdown
+### 4.5 Production Logic Algorithms
 
-#### Offers Microservice — Discount Calculation Logic
-
-**Pseudocode:**
+#### 4.5.1 Offers Engine: Multi-Factor Promo Validation & Atomic Reservation
+This algorithm validates coupon applicability against cart contents, user tier caps, category exclusions, and enforces distributed usage limits:
 
 ```
-FUNCTION calculateDiscount(cartId, promoCode, cartItems, subtotal, userTier):
-    // 1. Validate promo code existence
-    promo = offersRepository.findByCode(promoCode)
+FUNCTION evaluateAndLockPromo(userId, userTier, cartAggregate, promoCode):
+    // Step 1: Fetch promo definition from Read-Through Cache
+    promo = OffersCache.get("promo:def:" + promoCode)
     IF promo IS NULL:
-        RETURN Error("PROMO_NOT_FOUND")
-    
-    // 2. Check validity window
-    now = currentTimestamp()
-    IF now < promo.startDate OR now > promo.endDate:
-        RETURN Error("PROMO_EXPIRED")
-    
-    // 3. Check usage limits
-    IF promo.maxUses IS NOT NULL AND promo.usedCount >= promo.maxUses:
-        RETURN Error("PROMO_USAGE_LIMIT_REACHED")
-    
-    // 4. Check per-user usage limit
-    userUses = offerUsageRepository.countByUserAndPromo(currentUser.id, promoCode)
-    IF promo.maxUsesPerUser IS NOT NULL AND userUses >= promo.maxUsesPerUser:
-        RETURN Error("PROMO_PER_USER_LIMIT_REACHED")
-    
-    // 5. Check minimum order value
-    IF subtotal < promo.minOrderValue:
-        RETURN Error("MIN_ORDER_VALUE_NOT_MET", minRequired: promo.minOrderValue)
-    
-    // 6. Check applicable categories (if restricted)
-    IF promo.applicableCategories IS NOT NULL:
-        cartCategories = cartItems.map(item -> item.category).toSet()
-        IF NOT promo.applicableCategories.containsAny(cartCategories):
-            RETURN Error("PROMO_NOT_APPLICABLE_TO_CATEGORY")
-    
-    // 7. Calculate discount amount
-    discountAmount = 0
-    IF promo.type == 'PERCENTAGE':
-        discountAmount = subtotal * (promo.value / 100)
-        IF promo.maxDiscountAmount IS NOT NULL:
-            discountAmount = min(discountAmount, promo.maxDiscountAmount)
-    ELSE IF promo.type == 'FIXED_AMOUNT':
-        discountAmount = min(promo.value, subtotal)
-    
-    // 8. Apply tier-based multiplier (loyalty bonus)
-    tierMultiplier = getTierMultiplier(userTier)  // FREE=1.0, STARTER=1.0, GROWTH=1.1, ENTERPRISE=1.2
-    discountAmount = discountAmount * tierMultiplier
-    
-    // 9. Round to currency precision
-    discountAmount = round(discountAmount, 2)
-    
-    RETURN Success(discountAmount, promoId: promo.id)
-```
+        promo = OffersDatabase.findByCode(promoCode)
+        IF promo IS NULL:
+            RETURN Error(CODE="PROMO_NOT_FOUND", MSG="Invalid promo code")
+        OffersCache.set("promo:def:" + promoCode, promo, TTL=300s)
 
-**Example Calculation:**
-- Subtotal: ₹5,000
-- Promo: `DIWALI20` — 20% off, max discount ₹1,000, min order ₹2,000
-- User Tier: GROWTH (1.1x multiplier)
-- Base discount: ₹5,000 × 0.20 = ₹1,000 → capped at ₹1,000
-- Tier bonus: ₹1,000 × 1.1 = ₹1,100 → re-capped at promo max ₹1,000
-- Final discount: ₹1,000
-- Payable: ₹4,000
+    // Step 2: Validate temporal window
+    currentTime = System.currentTimeUtc()
+    IF currentTime < promo.validFrom OR currentTime > promo.validUntil:
+        RETURN Error(CODE="PROMO_EXPIRED", MSG="Offer has expired")
 
-#### Serviceability Microservice — Pincode Evaluation Logic
+    // Step 3: Check global & user redemption ceiling atomically in Redis
+    userUsageKey = "promo:user:" + promoCode + ":" + userId
+    globalUsageKey = "promo:global:" + promoCode
 
-**Pseudocode:**
+    // Atomic evaluation script via Redis
+    redisLockResult = Redis.executeScript("""
+        local globalCount = redis.call('GET', KEYS[1]) or 0
+        local userCount = redis.call('GET', KEYS[2]) or 0
+        if tonumber(globalCount) >= tonumber(ARGV[1]) then
+            return -1 -- Global limit exceeded
+        end
+        if tonumber(userCount) >= tonumber(ARGV[2]) then
+            return -2 -- User limit exceeded
+        end
+        redis.call('INCR', KEYS[1])
+        redis.call('INCR', KEYS[2])
+        return 1
+    """, keys=[globalUsageKey, userUsageKey], args=[promo.maxGlobalRedemptions, promo.maxPerUserRedemptions])
 
-```
-FUNCTION checkServiceability(pincode, items, preferredDeliveryDate):
-    // 1. Validate pincode format (6 digits, India)
-    IF NOT pincode.matches(/^[1-9][0-9]{5}$/):
-        RETURN Error("INVALID_PINCODE")
+    IF redisLockResult == -1:
+        RETURN Error(CODE="PROMO_EXHAUSTED", MSG="Global redemption limit reached")
+    IF redisLockResult == -2:
+        RETURN Error(CODE="USER_LIMIT_EXCEEDED", MSG="You have already redeemed this promo")
+
+    // Step 4: Validate cart minimum order value (MOV)
+    IF cartAggregate.subtotal < promo.minimumOrderValue:
+        // Compensate: release the incremented redis counters
+        Redis.decr(globalUsageKey)
+        Redis.decr(userUsageKey)
+        RETURN Error(CODE="MOV_NOT_MET", MSG="Minimum order value of ₹" + promo.minimumOrderValue + " required")
+
+    // Step 5: Filter applicable category items
+    applicableSubtotal = 0
+    FOR item IN cartAggregate.items:
+        IF promo.restrictedCategories IS EMPTY OR promo.restrictedCategories.contains(item.categoryId):
+            applicableSubtotal = applicableSubtotal + item.totalPrice
+
+    IF applicableSubtotal == 0:
+        Redis.decr(globalUsageKey)
+        Redis.decr(userUsageKey)
+        RETURN Error(CODE="CATEGORY_MISMATCH", MSG="No eligible items in cart for this offer")
+
+    // Step 6: Compute base discount
+    baseDiscount = 0
+    IF promo.discountType == "PERCENTAGE":
+        baseDiscount = applicableSubtotal * (promo.discountValue / 100.0)
+        IF promo.maxDiscountCap IS NOT NULL:
+            baseDiscount = MIN(baseDiscount, promo.maxDiscountCap)
+    ELSE IF promo.discountType == "FIXED_AMOUNT":
+        baseDiscount = MIN(promo.discountValue, applicableSubtotal)
+
+    // Step 7: Apply User Loyalty Tier Multiplier
+    tierMultiplier = 1.00
+    SWITCH userTier:
+        CASE "ENTERPRISE": tierMultiplier = 1.25
+        CASE "GROWTH":     tierMultiplier = 1.15
+        CASE "STARTER":    tierMultiplier = 1.05
+        DEFAULT:           tierMultiplier = 1.00
     
-    // 2. Check serviceability coverage
-    coverage = serviceabilityRepository.findByPincode(pincode)
-    IF coverage IS NULL OR coverage.status != 'SERVICEABLE':
-        RETURN ServiceabilityResult(
-            serviceable: false,
-            reason: "PINCODE_NOT_SERVICEABLE",
-            pincode: pincode
-        )
-    
-    // 3. Check item-level serviceability (vendor may not ship to all pincodes)
-    itemResults = []
-    FOR item IN items:
-        vendorCoverage = itemVendorRepository.findVendorPincode(item.vendorId, pincode)
-        IF vendorCoverage IS NULL OR vendorCoverage.status != 'ACTIVE':
-            itemResults.add(ItemServiceability(
-                sku: item.sku,
-                serviceable: false,
-                reason: "VENDOR_DOES_NOT_SHIP_TO_PINCODE"
-            ))
-        ELSE:
-            estimatedDelivery = calculateDeliveryDate(
-                pincode, 
-                vendorCoverage.warehouseId, 
-                preferredDeliveryDate
-            )
-            itemResults.add(ItemServiceability(
-                sku: item.sku,
-                serviceable: true,
-                estimatedDelivery: estimatedDelivery,
-                shippingCharges: vendorCoverage.shippingCharges,
-                codAvailable: vendorCoverage.codAvailable
-            ))
-    
-    // 4. Overall serviceability
-    allServiceable = itemResults.all { it.serviceable }
-    overallDeliveryDate = itemResults
-        .filter { it.serviceable }
-        .map { it.estimatedDelivery }
-        .max()  // Latest delivery date among all items
-    
-    RETURN ServiceabilityResult(
-        serviceable: allServiceable,
-        pincode: pincode,
-        estimatedDelivery: overallDeliveryDate,
-        items: itemResults,
-        totalShippingCharges: itemResults.sumOf { it.shippingCharges },
-        codAvailable: itemResults.all { it.codAvailable }
+    finalDiscount = ROUND(baseDiscount * tierMultiplier, 2)
+    IF promo.maxDiscountCap IS NOT NULL:
+        finalDiscount = MIN(finalDiscount, promo.maxDiscountCap)
+
+    RETURN Success(
+        promoId = promo.id,
+        code = promoCode,
+        discountApplied = finalDiscount,
+        reservationLockId = UUID.randomUUID()
     )
 ```
 
-**Example:**
-- Pincode: `110001` (Delhi)
-- Items: Headphones (Vendor A, ships to 110001), Cable (Vendor B, does NOT ship to 110001)
-- Result: `serviceable: false`, Cable marked non-serviceable with reason, Headphones marked serviceable with delivery date 2026-11-03
-
----
-
-## LAYER 5: BACKEND & DISTRIBUTED SYSTEM ARCHITECTURE
-
-**Dropbox System Design Architecture Adapted for E-Commerce**
-
-Dropbox's distributed system principles provide an excellent foundation for our microservices e-commerce platform. We'll implement the core architectural patterns while adapting them to our domain-specific requirements.
-
-### 5.1 High-Level Data Flow (Dropbox Pattern: Service-Oriented Architecture)
+#### 4.5.2 Serviceability Engine: Geo-Proximity & Carrier Routing SLA
+Evaluates whether a multi-warehouse shipment can be fulfilled to a target destination pincode within SLA:
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         CLIENT (Browser / Mobile App)                       │
-└───────────────────────────────────┬─────────────────────────────────────────┘
-                                    │ HTTPS / WSS (SSE)
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         API GATEWAY (Spring Cloud Gateway)                  │
-│  • SSL Termination • Rate Limiting • OAuth2/JWT Validation • Request Routing│
-│  • Request/Response Aggregation • Circuit Breaker • Observability           │
-└───────────────────────────────────┬─────────────────────────────────────────┘
-                                    │ gRPC / REST
-              ┌─────────────────────┼─────────────────────┐
-              ▼                     ▼                     ▼
-┌─────────────────────┐ ┌─────────────────────┐ ┌─────────────────────┐
-│  Service Discovery  │ │   Config Server     │ │   Domain Services   │
-│  (Eureka / Consul)  │ │ (Spring Cloud Config│ │ • User • Product   │
-│  • Service registry │ │  / Git backend)     │ │ • Item • Cart      │
-│  • Health checks    │ │ • Environment boot- │ │ • Order • Payment  │
-│  • Dynamic routing  │ │  strapping          │ │ • Notification ... │
-└─────────────────────┘ └─────────────────────┘ └───────────┬─────────┘
-                                                            │ gRPC / REST / Kafka
-                                              ┌─────────────┴─────────────┐
-                                              ▼                           ▼
-                                    ┌────────────────┐         ┌────────────────┐
-                                    │  Relational    │         │  Document /    │
-                                    │  DB (PostgreSQL│         │  Search (ES)   │
-                                    │  / MySQL)      │         │  (Redis / ES)  │
-                                    └────────────────┘         └────────────────┘
-                                              │
-                                              ▼
-                                    ┌────────────────┐
-                                    │   Kafka        │
-                                    │ (Event Stream) │
-                                    └────────────────┘
+FUNCTION evaluateServiceability(destinationPincode, cartItems, requestedPriority):
+    // Step 1: Validate destination postal format
+    IF NOT destinationPincode.matches("^[1-9][0-9]{5}$"):
+        RETURN ServiceabilityResult(isServiceable=false, reason="INVALID_PINCODE_FORMAT")
+
+    // Step 2: Fetch destination geographical hub metadata
+    destHub = ServiceabilityCache.getHubByPincode(destinationPincode)
+    IF destHub IS NULL OR destHub.isActive == false:
+        RETURN ServiceabilityResult(isServiceable=false, reason="NON_SERVICEABLE_ZONE")
+
+    warehouseShipmentPlans = []
+    overallServiceable = true
+
+    // Step 3: Iterate each SKU and resolve nearest vendor warehouse holding stock
+    FOR item IN cartItems:
+        candidateWarehouses = InventoryService.findWarehousesWithStock(item.sku, item.quantity)
+        IF candidateWarehouses IS EMPTY:
+            RETURN ServiceabilityResult(isServiceable=false, reason="SKU_OUT_OF_STOCK_GLOBALLY", sku=item.sku)
+
+        // Select warehouse with lowest geodesic / road distance
+        selectedWarehouse = NULL
+        minDistanceKm = INFINITY
+        FOR wh IN candidateWarehouses:
+            distance = calculateHaversineDistance(wh.latitude, wh.longitude, destHub.latitude, destHub.longitude)
+            IF distance < minDistanceKm:
+                minDistanceKm = distance
+                selectedWarehouse = wh
+
+        // Step 4: Check courier operational capability (e.g. Hazardous, Cold-Chain, Heavy)
+        carrierRoute = RoutingMatrix.findOptimalCarrier(
+            originHubId = selectedWarehouse.hubId,
+            destHubId = destHub.hubId,
+            weightGrams = item.weightGrams,
+            isHazardous = item.isHazardous
+        )
+
+        IF carrierRoute IS NULL:
+            overallServiceable = false
+            BREAK
+
+        // Step 5: Compute SLA considering warehouse daily cutoff time
+        currentTime = System.currentTimeUtc()
+        dispatchDayOffset = 0
+        IF currentTime.toLocalTime() > selectedWarehouse.dailyCutoffTime:
+            dispatchDayOffset = 1 // Orders past 4 PM dispatch next morning
+
+        calculatedDeliveryDate = currentTime.plusDays(dispatchDayOffset + carrierRoute.transitDays)
+
+        warehouseShipmentPlans.add(ShipmentPlan(
+            sku = item.sku,
+            originWarehouseId = selectedWarehouse.id,
+            carrierId = carrierRoute.carrierId,
+            transitDays = carrierRoute.transitDays,
+            estimatedDelivery = calculatedDeliveryDate,
+            shippingFee = carrierRoute.baseCost + (item.weightGrams / 1000.0 * carrierRoute.ratePerKg)
+        ))
+
+    IF NOT overallServiceable:
+        RETURN ServiceabilityResult(isServiceable=false, reason="NO_CARRIER_SERVICE_FOR_WEIGHT_OR_ZONE")
+
+    // Aggregate overall metrics (latest delivery date determines overall SLA)
+    maxDeliveryDate = warehouseShipmentPlans.map(p -> p.estimatedDelivery).max()
+    totalShippingFee = warehouseShipmentPlans.map(p -> p.shippingFee).sum()
+
+    RETURN ServiceabilityResult(
+        isServiceable = true,
+        destinationPincode = destinationPincode,
+        latestEstimatedDelivery = maxDeliveryDate,
+        totalShippingFee = ROUND(totalShippingFee, 2),
+        splitShipmentRequired = (warehouseShipmentPlans.map(p -> p.originWarehouseId).distinct().size() > 1),
+        shipmentPlans = warehouseShipmentPlans
+    )
 ```
 
-**Request Lifecycle (Example: Product Search - Dropbox Pattern Inspired):**
-
-1. **Config Server Bootstrap:** Similar to Dropbox, each microservice contacts Config Server at startup for environment properties, ensuring consistent configuration across all services.
-
-2. **Service Discovery Registration:** Each microservice registers with Eureka/Consul and sends heartbeats every 30s (Dropbox pattern for service discovery).
-
-3. **Client Request:** Buyer sends `GET /api/v1/products?query=headphones` to API Gateway.
-
-4. **Gateway Authentication:** Gateway extracts and validates JWT using JWKS endpoint (OAuth2 Resource Server pattern from Dropbox).
-
-5. **Gateway Routing:** Gateway routes to Product Service instances with round-robin from discovery cache (Dropbox's service discovery pattern).
-
-6. **Domain Service Processing:** Product Service queries Elasticsearch for full-text search, enriches with PostgreSQL, merges recommendations, checks stock via gRPC (efficient service communication pattern).
-
-7. **Database Read:** PostgreSQL for structured data; Elasticsearch for search; Redis for hot stock cache (Dropbox's distributed storage pattern).
-
-8. **Response:** Gateway returns aggregated JSON with cache headers (efficient response aggregation from Dropbox).
-
 ---
 
-### 5.2 Database Topography & Storage (Dropbox Pattern: Metadata + Chunk Services)
+## LAYER 5: BACKEND & DISTRIBUTED SYSTEMS ARCHITECTURE
 
-**Enhanced Data Boundary Enforcement (Dropbox Patterns):**
+### 5.1 Global High-Level System Architecture
 
-1. **Metadata Service Pattern (Dropbox's Metadata Service):**
-   - Central Metadata Service manages metadata across all microservices
-   - Contains file mappings, ownership, access controls, version history
-   - Reduces cross-service coupling by centralizing metadata access
-   - **E-commerce adaptation:** Manages product catalogs, user preferences, order metadata
-
-2. **Chunk-Based Storage (Dropbox's Chunk Service):**
-   - Large files (product images, order documents) split into 4MB-10MB chunks
-   - Each chunk uniquely identified by SHA-256 hash
-   - Content-based addressing eliminates duplication (e.g., same product images across catalogs)
-   - Implements resumable uploads and partial sync
-   - **E-commerce adaptation:** Product images, order receipts, user document uploads
-
-3. **Block-Level Sync Algorithm (Dropbox's Block-Level Sync):**
-   - Cart and order state changes tracked at block level (micro-level updates)
-   - Only modified blocks transmitted during synchronization between devices/services
-   - Enables efficient conflict detection and resolution
-   - Used for real-time cart updates across multiple user devices
-
-4. **Delta Synchronization (Dropbox's Delta Sync):**
-   - For cart state, stores only the differences (`delta`) between versions
-   - Reduces network bandwidth and improves sync performance
-   - Applied to user preferences, recommendations, and serviceability cache
-
-**Resource Estimation (Dropbox Pattern: Back-of-Envelope Calculations):**
-
-Assuming 50 million active users (MVU), average 2TB storage per user:
-
-**Storage Estimation:**
-- Total storage required: 50M users × 2TB = 100PB (petabytes)
-- With 3x replication across 3 data centers: 300PB physical storage
-- With compression (avg 2x compression ratio): 150PB physical storage
-- With content deduplication (avg 30% reduction): 105PB physical storage
-
-**Bandwidth Estimation:**
-- Average data per user per month: 50GB
-- Total monthly bandwidth: 50M users × 50GB = 2.5PB/month
-- Peak bandwidth (10x average): 25PB/month = ~833GB/s
-- Distributed across 3 data centers: ~278GB/s per data center
-
-**Server Estimation (Dropbox Pattern):**
-- Assuming 64-core servers with 1PB storage and 10Gbps network:
-  - Storage servers: 105PB ÷ 1PB = 105 servers
-  - Network load balancers: 6 per data center × 3 data centers = 18 servers
-  - Application servers (average 10k RPS per server): 4.2M RPS ÷ 10k = 420 servers
-  - Metadata service servers: 50 servers
-  - Total estimated infrastructure: ~548 servers
-
----
-
-### 5.3 Scalability, Caching & System Bottlenecks (Dropbox Pattern: Efficient Data Management)
-
-**Caching Strategy with Block-Level & Delta Sync (Dropbox Patterns):**
-
-| Service | Cache Layer | Technology | TTL | Eviction Policy | Pattern |
-|---------|------------|------------|-----|-----------------|---------|
-| Product | Product details, search results | Redis | 60s (details), 30s (search) | LRU | Cache-Aside |
-| Item | Stock levels (hot SKUs) + blocks | Redis | 10s | LRU | Read-Through + Block Cache |
-| Cart | Active carts + deltas | Redis | 30 days | TTL-based | Cache-Aside + Delta Sync |
-| Recommendations | Personalized recommendations | Redis | 300s | LRU | Write-Through + Populate Ahead |
-| Serviceability | Pincode coverage + blocks | Redis | 900s (15 min) | LRU | Read-Through |
-| API Gateway | Aggregated responses (non-user-specific) | Redis | 60s | LRU | Cache-Aside |
-| Metadata Service | Global file metadata, version tags | Redis | 120s | LRU | Pub/Sub notification + Invalidation |
-
-**Scalability Patterns with Chunk-Based Architecture (Dropbox Pattern):**
-
-1. **Product Service (Read-Heavy + Chunk Service):**
-   - Read replicas: 3x PostgreSQL read replicas for product catalog queries
-   - Elasticsearch cluster: 3 nodes with 2 replicas per shard
-   - Redis cache: 90% cache hit rate target for product detail page
-   - **Chunk Service:** 4MB chunk storage for product images; SHA-256 hash-based deduplication; 30% storage reduction
-   - **Content Delivery:** CDN for static product images, signed URLs for temporary access
-
-2. **Cart Service (Write-Heavy + Delta Sync):**
-   - Redis cluster with sharding by `userId` hash
-   - Optimistic locking via Redis `WATCH`/`MULTI`/`EXEC` for concurrent cart modifications
-   - **Delta Sync:** Cart state deltas only transmitted on changes (not full cart snapshot)
-   - **Hot Key Mitigation:** Consistent hashing with 512 virtual nodes per physical node
-   - **Cache Warm-up:** Pre-populate cart data on user login from Archival metadata
-
-3. **Order Service (Write-Heavy, ACID + Version Control):**
-   - PostgreSQL primary with 2 read replicas (for order history queries)
-   - Table partitioning by `created_at` (monthly partitions) for orders table
-   - **Optimistic Locking:** Version column in orders table (`version: Long = 0`)
-   - **Conflict Resolution:** Last-write-wins with notification; conflicted copy auto-created for editor collisions
-   - **Connection pooling (HikariCP, max 25 connections per instance)**
-
-4. **Payment Service (Write-Heavy, ACID + Idempotency):**
-   - PostgreSQL with synchronous replication to standby
-   - **Idempotency Keys:** All payment endpoints require `Idempotency-Key` header (UUID v4)
-   - **Write-Ahead Log (WAL) archiving** for point-in-time recovery
-   - **Chunking for large attachments:** Payment receipts > 10MB split into 4MB chunks stored in S3
-
-5. **Metadata Service (Scalability Pattern):**
-   - **Service Discovery with Metadata Caching:** Eureka/Consul + local Redis metadata cache
-   - **Partitioned Metadata:** Metadata sharded by user ID hash across 8 metadata nodes
-   - **Metadata Version Vectors:** Vector clocks for distributed metadata consistency
-   - **Pub/Sub Metadata Updates:** Real-time metadata propagation via Kafka topics
-
-**Event-Driven Streaming (Kafka) with Block-Level Updates (Dropbox Pattern):**
-
-| Topic | Producer | Consumers | Purpose | Block-Level |
-|-------|----------|-----------|---------|-------------|
-| `order.events` | Order Service | Notification, Archival, Recommendations | Order state changes | Full event |
-| `payment.events` | Payment Service | Order, Notification | Payment success/failure | Full event |
-| `inventory.events` | Item Service | Order, Cart | Stock reservation/release | Full event |
-| `user.events` | User Service | Recommendations, Notification | Profile updates | **User preference blocks only** |
-| `review.events` | Review & Ratings | Product, Recommendations | New reviews affect search ranking | Full review chunk |
-| `cart.deltas` | Cart Service | All services | Cart state changes across devices | **Only modified line items** |
-| `sync.blocks` | All Services | Sync Engine | File/product block updates | **Chunk hashes and locations** |
-
-**Bottleneck Mitigation with Chunk-Based & Dropbox Patterns:**
-
-1. **Flash Sale (Item Service Overload):**
-   - Circuit breakers on Item Service with fallback to "manual stock verification"
-   - **Queue-based order creation:** Orders accepted into Kafka topic `flash-sale-orders`, processed asynchronously with rate limiting (max 5k orders/sec)
-   - **Redis distributed locking (Redlock)** for stock reservation on high-contention products (≤ 5 second lock TTL)
-   - **Chunk-based order processing:** Large orders (> 20 line items) split into chunks, processed independently
-
-2. **Hot SKUs (Stock Reservation Contention):**
-   - **Redlock with 3-node quorum** for stock reservation
-   - **Optimistic locking:** Version-based stock check; retry with exponential backoff (100ms → 1s → 5s)
-   - **Pre-reservation:** Items pre-reserved in Redis cache for "Add to Cart" actions
-   - **Graceful degradation:** Show "Limited stock available" instead of hard errors
-
-3. **Database Connection Exhaustion:**
-   - **HikariCP** with timeout=30s and leak-detection-threshold=60s
-   - **Read/Write splitting:** All read queries go to replicas; writes to primary only
-   - **Connection pooling per tenant:** Multi-tenant isolation with separate connection pools
-   - **Graceful degradation:** Auto-switch to "read-only mode" during extreme load
-
-4. **Metadata Service Bottleneck:**
-   - **Local Redis cache** per microservice for frequently accessed metadata
-   - **Metadata version vectors** to detect stale caches
-   - **Background metadata refresh:** Periodic sync (every 30s) from authoritative source
-   - **Rate limiting:** 1000 metadata requests/min per service
-
-5. **Cross-Data Center Replication (3 DC Architecture - Dropbox Pattern):**
-   - **Active-Passive primary DC** with automatic failover
-   - **Cross-DC Kafka MirrorMaker 2.** for geo-replication
-   - **Chunk replication:** All product/image chunks replicated across all 3 data centers
-   - **Metadata conflict resolution:** Last-write-wins with Lamport timestamps for distributed consistency
-
-**Performance Optimization (Dropbox-Inspired):**
-
-1. **Resumable Upload/Download:** All file/product uploads support byte-range requests; clients can resume from last successful chunk
-2. **Compression Pipeline:** Gzip/Brotli compression for all JSON payloads (> 200 bytes); 70% average reduction
-3. **Connection Multiplexing:** HTTP/2 or gRPC for all inter-service communication; multiplexed streams over single TCP connection
-4. **Edge Caching:** CDN edge locations for product images and static assets; TTL 24h with purge on catalog update
-5. **Cold Start Optimization:** Service instances warmed up with pre-loaded metadata cache on startup
-
----
-
-### 5.4 Security & Compliance with Dropbox Patterns
-
-**Authentication & Authorization (OAuth2 + mTLS + Service Mesh - Dropbox Pattern):**
-
-1. **API Gateway (Entry Point) - Enhanced:**
-   - **OAuth2 Resource Server** validates JWT access tokens with JWKS rotation every 24h
-   - **JWKS endpoint** at `https://auth.platform.com/.well-known/jwks.json` with automatic key rotation
-   - **Token scope validation:** `cart:write`, `order:read`, `payment:write`, `admin:*`, `metadata:read`
-   - **Rate limiting per scope:** 1000 req/min for `cart:write`, 500 req/min for `order:write`, 2000 req/min for read scopes
-   - **IP reputation filtering** and bot detection at gateway layer (Cloudflare/ModSecurity)
-
-2. **JWT Structure with Enhanced Claims:**
-```json
-{
-  "sub": "cust_555666777",
-  "iss": "https://auth.platform.com",
-  "aud": "api.platform.com",
-  "roles": ["CUSTOMER"],
-  "scope": ["cart:write", "order:read", "metadata:read"],
-  "permissions": ["cart:add", "cart:remove", "order:create"],
-  "tenant_id": "tenant_001",
-  "device_id": "device_abc123",
-  "session_version": 14,
-  "exp": 1793572244,
-  "iat": 1793568644
-}
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                              CLIENT TIER (Web, iOS, Android)                           │
+└───────────────────────────────────────────┬────────────────────────────────────────────┘
+                                            │ Anycast DNS / HTTPS (TLS 1.3)
+                                            ▼
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│               GLOBAL EDGE NETWORK (Cloudflare Enterprise CDN & WAF)                     │
+│  • DDoS Shield • Bot Mitigation • Static Asset Cache (Images/JS) • SSL Termination     │
+└───────────────────────────────────────────┬────────────────────────────────────────────┘
+                                            │ HTTP/2 & HTTP/3
+                                            ▼
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│             API GATEWAY & SECURITY PERIMETER (Spring Cloud Gateway / Envoy)            │
+│  • Distributed Token-Bucket Rate Limiter (Redis) • OAuth2 / JWKS Token Verification     │
+│  • Request Header Sanitization • W3C Trace Context Injection • Circuit Breaker Routing │
+└───────────────────────────────────────────┬────────────────────────────────────────────┘
+                                            │ Internal Service Mesh (Istio STRICT mTLS)
+        ┌───────────────────────────────────┼───────────────────────────────────┐
+        ▼                                   ▼                                   ▼
+┌───────────────────────┐       ┌───────────────────────┐       ┌───────────────────────┐
+│ PRODUCT CATALOG SVC   │       │ CART & SESSION SVC    │       │ ORDER SAGA ORCHESTR.  │
+│ OpenSearch + Mongo/PG │       │ Redis 7 Cluster       │       │ PostgreSQL 16 (ACID)  │
+└───────────┬───────────┘       └───────────┬───────────┘       └───────────┬───────────┘
+            │                               │                               │
+            │                               │ gRPC Binary                   │ Debezium CDC
+            ▼                               ▼                               ▼
+┌───────────────────────┐       ┌───────────────────────┐       ┌───────────────────────┐
+│ ITEM & INVENTORY SVC  │       │ OFFERS & PROMO SVC    │       │ PAYMENT & LEDGER SVC  │
+│ Redis Lua + PostgreS  │       │ Redis + PostgreS      │       │ PostgreSQL Primary/Stby│
+└───────────┬───────────┘       └───────────┬───────────┘       └───────────┬───────────┘
+            │                               │                               │
+            └───────────────────────────────┼───────────────────────────────┘
+                                            ▼
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│               ENTERPRISE EVENT BUS (Apache Kafka Multi-AZ Cluster)                     │
+│   Topics: order.events · payment.events · inventory.events · notification.events        │
+└───────┬───────────────────────────┬───────────────────────────┬────────────────────────┘
+        │                           │                           │
+        ▼                           ▼                           ▼
+┌───────────────┐           ┌───────────────┐           ┌───────────────┐
+│ NOTIFICATION  │           │ RECOMMENDATION│           │ ARCHIVAL &    │
+│ ENGINE        │           │ ENGINE (Flink)│           │ COMPLIANCE    │
+│ SendGrid/Twil │           │ Redis + Python│           │ S3 / Parquet  │
+└───────────────┘           └───────────────┘           └───────────────┘
 ```
 
-3. **Inter-Service Security (Zero Trust + mTLS - Dropbox Pattern):**
-   - **mTLS:** All service-to-service communication over mutual TLS (Istio service mesh with Envoy sidecars)
-   - **Service Mesh Policies:** `DestinationRule` and `PeerAuthentication` enforcing STRICT mTLS
-   - **Service Tokens:** Short-lived JWTs (5-minute TTL) for service-to-service calls, signed by SPIFFE/SPIRE
-   - **Header Propagation:** `X-Request-ID`, `X-User-ID`, `X-Correlation-ID`, `X-B3-TraceID` propagated across all services
-   - **Authorization Policy:** Fine-grained RBAC at mesh level (e.g., `cart-service` can only call `item-service:reserve`, not `item-service:delete`)
+---
 
-4. **Metadata Service Security (Dropbox Pattern):**
-   - **Access Control Lists (ACLs):** Per-resource ACLs stored in metadata service
-   - **Permission Matrix:** Owner, Editor, Viewer roles for shared carts/orders
-   - **Temporary Access Tokens:** Time-limited (1hr-7day) signed URLs for shared orders/carts
-   - **Audit Trail:** All metadata access logged with user, action, timestamp, and IP
+### 5.2 Polyglot Persistence & Database Topography
 
-**Configuration Security with Vault & Secret Rotation (Dropbox Pattern):**
+Under the **Database-per-Service** architectural pattern, each microservice encapsulates its own persistent store with zero cross-database queries:
 
-1. **Central Config Server (Spring Cloud Config + HashiCorp Vault):**
-   - **Git backend** encrypted with SOPS/Mozilla SOPS for at-rest encryption
-   - **Dynamic secrets** from Vault (database credentials rotated every 24h)
-   - **`/actuator` endpoints** restricted to internal network with mTLS
-   - **TLS between Config Server and client services** with certificate pinning
-
-2. **Secret Management (Vault + Dynamic Secrets):**
-   - **Database credentials:** Dynamic Vault roles with 1-hour TTL, auto-rotated
-   - **API keys:** Static secrets in Vault KV v2 with versioning
-   - **Signing keys:** JWKS keys managed by Vault Transit engine
-   - **No secrets in `build.gradle.kts` or source control** - all injected at runtime via sidecar
-
-3. **Encryption at Rest & In Transit (Dropbox Pattern):**
-   - **AES-256-GCM** for all data at rest (databases, S3, Redis, Kafka)
-   - **TLS 1.3** for all data in transit (inter-service, client-to-gateway, gateway-to-service)
-   - **Chunk-level encryption:** Each 4MB chunk individually encrypted with unique key derived from master key
-   - **Key Hierarchy:** Master key in HSM → Data encryption keys per service → Chunk encryption keys per object
-   - **Key Rotation:** Annual master key rotation; 90-day DEK rotation; per-chunk keys not rotated (re-encrypted on access)
-
-**Compliance with Dropbox-Level Standards:**
-
-| Requirement | Implementation | Owner Service | Pattern |
-|-------------|---------------|---------------|---------|
-| **PCI DSS Level 1** | Payment service tokenization; card data never hits platform; encrypted DB fields; HSM for key management | Payment | Tokenization + HSM |
-| **GDPR** | Right-to-erasure: Archival service hard-deletes user data on request; consent tracking in User service; data portability API | User, Archival | Erasure + Portability |
-| **SOC 2 Type II** | Audit logs (who, what, when) in Order and Payment services; quarterly access reviews; automated compliance dashboards | All services | Audit Logging |
-| **RBI (India)** | Data localization: payment and order data stored in India region; 2FA for card payments; encryption at rest in IN data centers | Payment, Order | Geo-fencing |
-| **HIPAA (if health products)** | Encryption of PHI; Business Associate Agreements; access logging; breach notification procedures | User, Order, Payment | PHI Protection |
-| **ISO 27001** | ISMS with risk assessments; incident response procedures; security awareness training | Platform | ISMS |
-
-**Observability with Distributed Systems Patterns (Dropbox-Enhanced):**
-
-1. **Distributed Tracing (OpenTelemetry + Jaeger + Tempo):**
-   - **Trace Context Propagation:** W3C TraceContext (`traceparent`, `tracestate`) headers
-   - **Service Graph:** Auto-generated service dependency map with latency distributions
-   - **Trace Sampling:** 100% for errors; 10% for success; adaptive sampling based on throughput
-   - **Correlation IDs:** `X-Correlation-ID` links business transactions (e.g., order checkout) across services
-
-2. **Metrics (Prometheus + Grafana + Mimir):**
-   - **RED Metrics per service:** Rate, Errors, Duration (P50, P95, P99)
-   - **USE Metrics per resource:** Utilization, Saturation, Errors (CPU, Memory, Disk, Network)
-   - **Business Metrics:** Cart-to-Order conversion, Offer redemption, Serviceability success rate
-   - **SLO/SLI Dashboard:** Service Level Objectives with error budget tracking
-   - **Long-term Storage:** Grafana Mimir for 13-month metric retention
-
-3. **Structured Logging (ELK + OpenTelemetry Collector):**
-   - **JSON Logs:** All services emit structured JSON with `timestamp`, `level`, `service`, `trace_id`, `span_id`, `message`, `fields`
-   - **Log Levels:** ERROR (actionable), WARN (degraded), INFO (business events), DEBUG (diagnostic)
-   - **Log Sampling:** 100% ERROR/WARN; 10% INFO; 1% DEBUG
-   - **Centralized:** OpenTelemetry Collector → Elasticsearch → Kibana
-
-4. **Health Checks (Spring Actuator + Kubernetes Probes):**
-   - **Liveness Probe:** `/actuator/health/liveness` - process alive, no dependencies
-   - **Readiness Probe:** `/actuator/health/readiness` - dependencies reachable (DB, Kafka, Redis)
-   - **Startup Probe:** `/actuator/health/startup` - for slow-starting services (migrations)
-   - **Health Indicators:** DB connectivity, Kafka lag, Redis cluster state, disk space, memory pressure
-
-5. **Alerting (Prometheus Alertmanager + PagerDuty + Slack):**
-   - **Critical:** Service down > 1min; Error rate > 5% for 2min; P99 latency > 5s
-   - **Warning:** Error rate > 1% for 5min; P99 latency > 2s; Disk > 80%; Kafka lag > 10k
-   - **Info:** New deployment; Config change; Certificate expiry < 30 days
-   - **Runbooks:** Every alert links to runbook with diagnosis steps and remediation procedures
-
-6. **Chaos Engineering (LitmusChaos / Chaos Mesh):**
-   - **Weekly experiments:** Pod kill, network latency, CPU stress, DNS failure
-   - **Game Days:** Monthly cross-team chaos exercises simulating flash sale + DC failure
-   - **Automated Remediation:** Failed experiments auto-create JIRA tickets with findings
-
-**Disaster Recovery (Multi-Region with RPO/RTO):**
-
-| Tier | Services | RPO | RTO | Strategy |
-|------|----------|-----|-----|----------|
-| **Tier 0 (Critical)** | Order, Payment, User | < 1s | < 5min | Synchronous replication; active-active across 2 IN regions |
-| **Tier 1 (Important)** | Cart, Item, Notification | < 1min | < 30min | Async Kafka replication; read replicas in DR region |
-| **Tier 2 (Standard)** | Product, Recommendations, Offers, Serviceability | < 1hr | < 4hr | Nightly snapshots; cross-region S3 replication |
-| **Tier 3 (Batch)** | Archival, Review & Ratings | < 24hr | < 24hr | Weekly exports; cold storage in Glacier |
-
-**Data Governance:**
-- **Data Lineage:** Automated lineage tracking from source (User service) to destination (Archival) via OpenLineage
-- **Data Quality:** Great Expectations validation on all critical pipelines (order completeness, payment reconciliation)
-- **Data Catalog:** Amundsen/DataHub for service data discovery, ownership, and sensitivity tagging
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                              POLYGLOT PERSISTENCE TOPOLOGY                              │
+├────────────────────┬────────────────────┬────────────────────┬──────────────────────────┤
+│ Microservice       │ Primary Store      │ Secondary / Cache  │ Rationale & SLA          │
+├────────────────────┼────────────────────┼────────────────────┼──────────────────────────┤
+│ Product Catalog    │ PostgreSQL 16      │ OpenSearch 2.13    │ CQRS: Writes to RDBMS;   │
+│                    │ (Master Catalog)   │ (Search & Facets)  │ CDC to OpenSearch index  │
+├────────────────────┼────────────────────┼────────────────────┼──────────────────────────┤
+│ Item & Inventory   │ PostgreSQL 16      │ Redis 7 Cluster    │ Redis Lua for sub-5ms    │
+│                    │ (Ledger History)   │ (Atomic Counters)  │ flash reservation; RDBMS │
+├────────────────────┼────────────────────┼────────────────────┼──────────────────────────┤
+│ Cart & Session     │ Redis 7 Cluster    │ RocksDB / AWS S3   │ In-memory hash sets with │
+│                    │ (Sharded by User)  │ (Abandoned Carts)  │ 30-day TTL; sub-2ms R/W  │
+├────────────────────┼────────────────────┼────────────────────┼──────────────────────────┤
+│ Order Processing   │ PostgreSQL 16      │ Redis              │ Strict ACID; table       │
+│                    │ (Multi-AZ Replica) │ (Read-Through)     │ partition by created_at  │
+├────────────────────┼────────────────────┼────────────────────┼──────────────────────────┤
+│ Payment & Ledger   │ PostgreSQL 16      │ None (Strict ACID) │ Double-entry bookkeeping │
+│                    │ (Sync Standby)     │                    │ Financial auditability   │
+├────────────────────┼────────────────────┼────────────────────┼──────────────────────────┤
+│ User & IAM         │ PostgreSQL 16      │ Redis (JWKS & Auth)│ OAuth token revocation   │
+├────────────────────┼────────────────────┼────────────────────┼──────────────────────────┤
+│ Offers & Promos    │ PostgreSQL 16      │ Redis (Rate Caps)  │ Atomic usage counters    │
+├────────────────────┼────────────────────┼────────────────────┼──────────────────────────┤
+│ Serviceability     │ PostgreSQL PostGIS │ Redis (Geo Index)  │ H3 hexagonal geospatial  │
+├────────────────────┼────────────────────┼────────────────────┼──────────────────────────┤
+│ Review & Ratings   │ MongoDB 7.0        │ Redis (Hot Reviews)│ Flexible review schema   │
+├────────────────────┼────────────────────┼────────────────────┼──────────────────────────┤
+│ Data Archival      │ Apache Iceberg     │ AWS S3 / Glacier   │ Parquet cold partitions  │
+└────────────────────┴────────────────────┴────────────────────┴──────────────────────────┘
+```
 
 ---
 
-**Document End.**  
-**Version:** 1.1 (Dropbox-Inspired Patterns Integrated)  
-**Next Review:** After Phase 1 implementation (MVP launch)
+### 5.3 Realistic E-Commerce Capacity Planning & System Sizing
+
+#### 5.3.1 Traffic & Scale Parameters
+* **Registered Accounts:** $50,000,000$ users.
+* **Daily Active Users (DAU):** $5,000,000$ users.
+* **Peak Flash-Sale Concurrent Users:** $100,000$ active connections.
+* **Average Daily Completed Orders:** $500,000$ orders/day.
+* **Peak Order Velocity (Flash-Sale):** $1,000\text{ Orders/sec}$ ($1,000\text{ TPS}$).
+* **Browse-to-Buy Ratio:** $50 : 1$ (50 search/catalog reads per 1 order checkout).
+* **Peak Catalog Read Traffic:** $50,000\text{ QPS}$ at API Gateway.
+
+#### 5.3.2 Storage Calculations
+1. **Order Transactions:**
+   * Average order record size (including JSON snapshots and line items): $4\text{ KB}$.
+   * Daily storage consumption: $500,000 \times 4\text{ KB} = 2.0\text{ GB/day}$.
+   * Annual order storage: $2.0\text{ GB} \times 365 = 730\text{ GB/year}$.
+   * 5-Year active transactional retention (PostgreSQL): $\approx 3.65\text{ TB}$ (trivially managed via monthly table partitioning).
+2. **Product Catalog & Media Assets:**
+   * $10,000,000$ active catalog SKUs $\times 2\text{ KB}$ metadata $= 20\text{ GB}$ raw RDBMS storage.
+   * OpenSearch Search Indices (with inverted text indices, vectors, and facets): $\approx 120\text{ GB}$.
+   * Product Images: $10,000,000\text{ SKUs} \times 4\text{ images} \times 400\text{ KB (WebP)} = 16\text{ TB}$ stored in AWS S3 / Google Cloud Storage, with $98\%$ served directly from Cloudflare Edge Caches.
+3. **Cart In-Memory Footprint (Redis):**
+   * $5,000,000\text{ active carts} \times 1.5\text{ KB (JSON structure)} = 7.5\text{ GB}$ active memory.
+   * Scaled with $3\times$ replication factor across 6 Redis shards: $22.5\text{ GB}$ total RAM required.
+
+#### 5.3.3 Compute & Network Throughput
+* **Edge CDN Ingress/Egress:** Peak catalog egress at $50,000\text{ QPS} \times 15\text{ KB (compressed JSON)} = 750\text{ MB/s} = 6.0\text{ Gbps}$.
+* **API Gateway Sizing:** Envoy instances processing $50,000\text{ QPS}$; at $5,000\text{ QPS}$ per 8-core CPU node $\rightarrow 10$ active Gateway instances (autoscaling to 20 during flash sales).
+* **Kafka Cluster Throughput:** Peak write volume of $25,000\text{ events/sec} \times 2\text{ KB} = 50\text{ MB/s}$ ingress. A 5-broker Kafka cluster with NVMe SSDs handles this with $< 20\%$ disk I/O saturation.
+
+---
+
+### 5.4 Flash-Sale Hardening & Concurrency Control
+
+```
+                              ┌────────────────────────┐
+                              │  50,000 CONCURRENT USERS│
+                              └───────────┬────────────┘
+                                          │
+                                          ▼
+                              ┌────────────────────────┐
+                              │ CLOUDFLARE WAITING ROOM│ (Smooths excess spikes)
+                              └───────────┬────────────┘
+                                          │
+                                          ▼
+                              ┌────────────────────────┐
+                              │ API GATEWAY RATE LIMIT │ (Token-Bucket per User)
+                              └───────────┬────────────┘
+                                          │
+                  ┌───────────────────────┴───────────────────────┐
+                  │                                               │
+                  ▼                                               ▼
+      ┌───────────────────────┐                       ┌───────────────────────┐
+      │   HOT SKU (FLASH SALE)│                       │     STANDARD CATALOG  │
+      └───────────┬───────────┘                       └───────────┬───────────┘
+                  │                                               │
+                  ▼                                               ▼
+      ┌───────────────────────┐                       ┌───────────────────────┐
+      │ REDIS LUA ATOMIC LEASE│ (Sub-5ms Lockless)    │ POSTGRES READ-REPLICA │
+      └───────────┬───────────┘                       └───────────────────────┘
+                  │
+                  ▼
+      ┌───────────────────────┐
+      │ ASYNC KAFKA QUEUE     │ (Drives Saga DB writes)
+      └───────────────────────┘
+```
+
+1. **Virtual Waiting Room (Queue-It / Cloudflare Waiting Room):** Activated when checkout ingress exceeds $2,500\text{ requests/sec}$, metering traffic into the API Gateway deterministically.
+2. **Distributed Rate Limiting:** Enforced at the API Gateway via Redis Token-Bucket:
+   * Anonymous IP: Max $100\text{ requests/min}$.
+   * Authenticated Buyer: Max $1,000\text{ requests/min}$.
+   * Checkout Endpoint: Max $5\text{ attempts/min}$ per `userId`.
+3. **Cache Stampede Prevention:**
+   * **Probabilistic Early Expiration (XFetch Algorithm):** Recomputes catalog cache keys before they expire based on read frequency and background worker calculation time.
+   * **Singleflight Request Coalescing:** Gateway merges concurrent in-flight requests for identical product detail fetches, preventing backend query surges.
+4. **Hot SKU Locking with Redlock & Fencing Tokens:**
+   * High-value limited items utilize Redlock across 3 independent Redis nodes with monotonically increasing fencing tokens to prevent split-brain double-reservation.
+
+---
+
+### 5.5 Zero-Trust Security, PCI DSS & Regulatory Compliance
+
+#### 5.5.1 Authentication, Authorization & Identity Management
+* **OAuth 2.0 & OpenID Connect (OIDC):** Microservices act as OAuth 2.0 Resource Servers validating JWT tokens issued by the User & IAM Service (powered by Keycloak / Ory Hydra).
+* **JWKS Cryptographic Rotation:** API Gateway verifies token signatures using public keys fetched from `https://auth.platform.com/.well-known/jwks.json`, with automated key rotation every 30 days.
+* **Workload Identity (SPIFFE/SPIRE):** Every Kubernetes pod receives a short-lived X.509 certificate validating its workload identity, establishing **STRICT mutual TLS (mTLS)** across all service-to-service communication via Istio.
+* **Fine-Grained RBAC / ABAC Permissions:** Enforced at Envoy sidecars via Open Policy Agent (OPA) filters:
+  ```json
+  {
+    "sub": "usr_9921049",
+    "iss": "https://auth.platform.com",
+    "roles": ["CUSTOMER"],
+    "scope": "openid profile cart:write order:create payment:initiate",
+    "exp": 1793572244,
+    "jti": "jwt_token_unique_id"
+  }
+  ```
+
+#### 5.5.2 PCI DSS Level 1 SAQ-A Compliance Boundary
+* **Zero Primary Account Number (PAN) Footprint:** No credit card numbers, CVVs, or expiration dates ever touch or transit platform servers.
+* **Tokenized Client-Side Capture:** Buyer enters card details directly into hosted iframes / SDKs provided by certified payment processors (Stripe Elements / Adyen Drop-in / Razorpay Checkout).
+* The Payment Service processes only opaque tokens (e.g., `tok_1N4m...`), satisfying **PCI DSS SAQ-A** eligibility and dramatically lowering compliance overhead.
+
+#### 5.5.3 Regulatory Framework Enforcement
+* **RBI Data Localization (India):** All transactional order, user PII, and financial settlement databases reside exclusively within AWS/GCP regions inside India (`ap-south-1` Mumbai / `ap-south-2` Hyderabad).
+* **GDPR Compliance (Right to Erasure / Portability):**
+  * When a user exercises their Right to be Forgotten, User Service publishes `UserAccountDeletedEvent`.
+  * The Archival Service executes a cryptographic erase or hard-delete of personal identifiers across cold tables, preserving anonymized order records for statutory accounting obligations.
+
+---
+
+### 5.6 Enterprise Observability, SRE & Disaster Recovery
+
+#### 5.6.1 OpenTelemetry Distributed Tracing & W3C Standards
+Every inbound request at the API Gateway is tagged with a standard **W3C TraceContext** header:
+* `traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01`
+* Injected into downstream HTTP headers, gRPC metadata, and Kafka message headers.
+* Traces ingested into OpenTelemetry Collector and exported to **Grafana Tempo / Jaeger**, guaranteeing end-to-end request visibility across all 12 domains.
+
+#### 5.6.2 Metrics & Golden Signals (Prometheus / Alertmanager)
+* **RED Metrics:** Rate (requests/sec), Errors (5xx status count), Duration (P50, P95, P99 latency) per microservice.
+* **USE Metrics:** Utilization, Saturation, and Errors for CPU, memory, and database connection pools.
+* **Core Production Alerts:**
+  * **P0 - Critical (PagerDuty):** Order Service 5xx error rate $> 1.0\%$ for 2 consecutive minutes; Payment webhook failure rate $> 0.5\%$; Inventory Redis cluster CPU saturation $> 85\%$.
+  * **P1 - Warning (Slack):** P99 catalog search latency $> 250\text{ ms}$; Kafka consumer group lag $> 10,000\text{ messages}$; Free disk space $< 20\%$.
+
+#### 5.6.3 Disaster Recovery Tiering & Multi-Region Topology
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                              DISASTER RECOVERY ARCHITECTURE                            │
+├────────────────────┬────────────────────┬──────────┬──────────┬────────────────────────┤
+│ Recovery Tier      │ Domains Covered    │ RPO      │ RTO      │ Failover Topology      │
+├────────────────────┼────────────────────┼──────────┼──────────┼────────────────────────┤
+│ **Tier 0**         │ Order, Payment,    │ $< 1\text{ sec}$ │ $< 3\text{ min}$ │ Active-Active Hot Standby│
+│ (Mission Critical) │ Inventory, User    │          │          │ Multi-AZ Sync Repl     │
+├────────────────────┼────────────────────┼──────────┼──────────┼────────────────────────┤
+│ **Tier 1**         │ Cart, Offers,      │ $< 30\text{ s}$│ $< 15\text{ min}$│ Cross-Region Asymmetric│
+│ (Business Critical)│ Serviceability     │          │          │ Kafka MirrorMaker 2.0  │
+├────────────────────┼────────────────────┼──────────┼──────────┼────────────────────────┤
+│ **Tier 2**         │ Product Catalog,   │ $< 1\text{ hr}$  │ $< 2\text{ hr}$  │ Read Replicas + Hourly │
+│ (Operational)      │ Reviews, Notif     │          │          │ Snapshots to S3        │
+├────────────────────┼────────────────────┼──────────┼──────────┼────────────────────────┤
+│ **Tier 3**         │ Recommendations,   │ $< 24\text{ hr}$ │ $< 8\text{ hr}$  │ Batch Rehydration from │
+│ (Analytical)       │ Archival Analytics │          │          │ Cold Parquet Tables    │
+└────────────────────┴────────────────────┴──────────┴──────────┴────────────────────────┘
+```
+
+* **Recovery Point Objective (RPO):** Maximum acceptable data loss window during catastrophic regional failure.
+* **Recovery Time Objective (RTO):** Maximum duration to restore services following a disaster declaration.
+* **Automated Chaos Testing:** Chaos Mesh scheduled weekly in pre-production simulating pod evictions, network latency injection, and Kafka broker kills to continuously validate self-healing capabilities.
+
+---
+
+## 6. SYSTEM IMPLEMENTATION ROADMAP
+
+```mermaid
+gantt
+    title E-Commerce Microservices Production Rollout Plan
+    dateFormat  YYYY-MM-DD
+    section Phase 1: Core Foundation
+    API Gateway & Mesh Setup           :2026-11-01, 30d
+    User & IAM Service                 :2026-11-15, 30d
+    Product Catalog & OpenSearch       :2026-11-20, 45d
+    section Phase 2: Transaction Engine
+    Item & Inventory (Redis Lua)       :2026-12-15, 45d
+    Cart & Session Microservice        :2027-01-01, 30d
+    Order Saga Orchestrator            :2027-01-15, 45d
+    Payment & Settlement Ledger        :2027-02-01, 45d
+    section Phase 3: Experience & Scale
+    Offers & Promotions Engine         :2027-03-01, 30d
+    Serviceability & Logistics         :2027-03-15, 30d
+    Notification Multi-Provider        :2027-04-01, 30d
+    Review & Recommendations           :2027-04-15, 45d
+    section Phase 4: Production Hardening
+    Chaos Engineering & Load Testing   :2027-05-15, 30d
+    Production Canary Cutover          :2027-06-15, 15d
+```
+
+---
+
+**Document Approval & Sign-Off:**
+
+| Role | Name | Status | Timestamp |
+| :--- | :--- | :--- | :--- |
+| **Lead Distributed Systems Architect** | Distributed Systems Architecture Review Board | **APPROVED** | 2026-11-01T14:00:00Z |
+| **Head of Infrastructure & SRE** | Site Reliability Engineering Council | **APPROVED** | 2026-11-01T14:15:00Z |
+| **Principal Product Architect** | E-Commerce Product Engineering Committee | **APPROVED** | 2026-11-01T14:30:00Z |
