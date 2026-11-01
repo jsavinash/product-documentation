@@ -265,86 +265,342 @@ type DataState<T> =
 
 ### 3.3 Client-Side Performance & Resiliency with Frontend System Design
 
-**Rendering Model with Performance Optimization:**
+#### Comprehensive UI Requirements (Functional & Non-Functional)
 
-| Page Type | Render Strategy | Rationale | Key Techniques |
-|-----------|----------------|-----------|----------------|
-| Product Catalog / Search | SSR (Next.js) | SEO + fast FCP | Critical CSS, image lazy loading, font subsetting |
-| Product Detail | SSR + Hydration | SEO + interactivity | Streaming SSR, Suspense boundaries |
-| Cart / Checkout | CSR/SPA | User-specific, dynamic | Optimistic updates, client-side validation |
-| Account / Profile | CSR/SPA | Authenticated, private | Data prefetching, skeleton screens |
-| Order Tracking | SSR + SSE | Public URL + real-time | SSE stream for live updates |
+**Functional Requirements:**
+- **Demand:** Module & Feature requirements for core shopping experience
+- **Supply:** Module & Feature requirements for platform capabilities
 
-**Network Performance Optimization (per Chakde System Design):**
+**Non-Functional Requirements:**
 
-1. **Resource Prioritization:**
-   - `rel="preload"` for critical assets (fonts, hero images)
-   - `rel="preconnect"` for API gateway and CDN domains
-   - `rel="prefetch"` for next-page resources on hover
+| Category | Requirement | Implementation |
+|----------|-------------|----------------|
+| **Mobile / Desktop First** | Responsive design with mobile-first approach | CSS Grid/Flexbox, adaptive breakpoints |
+| **Responsive / Adaptive** | Device detection and appropriate rendering | `viewport-fit`, responsive typography |
+| **Location / Device / Internet** | Context-aware experiences | Geolocation API, offline detection |
+| **Accessibility** | WCAG 2.1 AA compliance | ARIA labels, keyboard navigation, screen reader support |
+| **Asset Optimization** | Efficient delivery of web assets | Image compression, bundling, lazy loading |
+| **Performance** | Core Web Vitals optimization | FCP < 1.8s, LCP < 2.5s, TTI < 3s, CLS < 0.1 |
+| **CSR / SSR** | Hybrid rendering strategy | Next.js with selective hydration |
+| **Authentication / Authorization** | Secure user session management | OAuth 2.0, JWT tokens, role-based access |
+| **Security** | Protection against common threats | CSP, XSS prevention, CSRF tokens |
+| **SEO** | Search engine optimization | Server-side rendering, structured data |
+| **Caching** | Multi-level caching strategy | HTTP cache, service worker, application cache |
+| **Offline Support** | Graceful degradation during connectivity | Service Worker, IndexedDB, queued operations |
+| **Micro Frontend** | Component-based architecture | Module federation, independent deployment |
+| **Logging & Monitoring** | Performance and error tracking | Sentry, LogRocket, custom analytics |
+| **A / B Testing** | Experiment framework | Optimizely, LaunchDarkly, custom A/B logic |
+| **Testing** | Comprehensive testing coverage | Unit, integration, E2E testing |
+| **Internationalisation / Localisation** | Multi-language support | i18next, locale detection |
+| **Versioning** | API and component versioning | Semantic versioning, API versioning |
+| **PWA** | Progressive Web App capabilities | Service Worker, manifest, offline cache |
+| **CI/CD** | Automated deployment pipeline | GitHub Actions, Docker, Kubernetes |
 
-2. **Connection Efficiency:**
-   - HTTP/2 server push for critical resources
-   - Keep-alive connections to gateway
-   - TCP/TLS connection pooling
+#### Component Architecture Design
 
-3. **Debounce & Throttle:**
-   - Search input debounced at 300ms
-   - Scroll event throttled at 100ms for lazy loading triggers
-   - Stock check debounced at 500ms after variant selection
+**Micro Frontend Architecture:**
+- Module Federation via Webpack Module Federation
+- Independent deployment cycles per domain module
+- Shared dependencies via common vendor bundle
+- Runtime remote loading with error boundaries
 
-**Asset Optimization:**
+**Component Structure:**
+```typescript
+// Core component patterns
+interface BaseComponent {
+  id: string;
+  props: any;
+  state: ComponentState;
+  events: EventBinding[];
+}
 
-| Asset Type | Technique | Benefit |
-|------------|-----------|---------|
-| Product Images | WebP/AVIF format, responsive `srcset`, CDN, lazy loading | 70% reduction in image payload |
-| Fonts | WOFF2, font-display: swap, subsetting | Reduced CLS and FOUT |
-| JavaScript | Code splitting by route, tree-shaking, minification | Smaller initial bundle |
-| CSS | Critical CSS inline, non-critical deferred | Faster first paint |
-
-**Bundle Splitting Strategy:**
-
+// Domain-specific components
+ProductCard, SearchBar, FilterPanel, CartDrawer, 
+CheckoutForm, OrderTracker, ReviewWidget, 
+RecommendationCarousel, ServiceabilityChecker
 ```
-vendor-bundle.js       → React, React Router, Redux (shared)
-feature-catalog.js     → Product search, filters, facets
-feature-checkout.js    → Cart, checkout, payment forms
-feature-account.js     → User profile, orders, addresses
-runtime-bundle.js      → Webpack runtime, manifest
+
+**Component Communication Patterns:**
+- **Event Bus:** Centralized event system for cross-component communication
+- **State Management:** Centralized store with reactivity (Redux, Zustand, Jotai)
+- **API Integration:** Component-specific API clients with error boundaries
+
+#### Data Model Design
+
+**Unified State Management:**
+```typescript
+interface GlobalStore {
+  user: UserProfile;
+  cart: CartState;
+  products: ProductCatalog;
+  orders: OrderHistory;
+  recommendations: RecommendationEngine;
+  serviceability: ServiceabilityCache;
+  ui: UIState;
+}
 ```
 
-**Bundle Size Targets:**
-- Initial JS: < 150 KB gzipped
-- CSS: < 30 KB gzipped
-- Hero image: < 50 KB WebP
-- Time to Interactive: < 2s on 4G, < 3s on 3G
+**API Data Contracts:**
+```typescript
+// Product API Contract
+type ProductAPI = {
+  getProducts: (filters: ProductFilters) => Promise<ProductConnection>;
+  getProduct: (id: string) => Promise<Product>;
+  searchProducts: (query: string) => Promise<Product[]>;
+};
 
-**Local Caching Strategies:**
+// Cart API Contract  
+type CartAPI = {
+  addItem: (item: CartItem) => Promise<Cart>;
+  updateItem: (id: string, updates: Partial<CartItem>) => Promise<Cart>;
+  removeItem: (id: string) => Promise<Cart>;
+  applyPromo: (code: string) => Promise<Cart>;
+};
+```
 
-| Cache Type | Storage | TTL | Use Case |
-|------------|---------|-----|----------|
-| Product Catalog | IndexedDB | 30 min | Browse without re-fetch |
-| Cart State | LocalStorage + Redis sync | 30 days | Persist across sessions |
-| Auth Token | Memory (access) + httpOnly cookie (refresh) | 15 min / 7 days | XSS protection |
-| Serviceability Results | sessionStorage | 15 min | Pincode check during session |
-| User Preferences | LocalStorage | 1 year | Theme, locale, notifications |
-| Offline Queue | IndexedDB | Until sync | Mutations during offline |
+#### API Design
 
-**Request Deduplication & In-Flight Request Management:**
-- Single in-flight call per unique request signature
-- Components subscribing to same data share the promise
-- Cache key includes user ID, pagination, and filters
-- Stale data served while revalidating in background
+**REST API Design (Chakde System Design Approach):**
 
-**Error Boundary & Fallback UI:**
-- **React Error Boundaries:** Catch component tree errors, show retry UI
-- **Skeleton Screens:** Shimmer placeholders during loading states
-- **Empty States:** "No products found" with filter reset suggestion
-- **Offline Indicator:** Toast notification when client goes offline; queue mutations
+**Resource Hierarchy:**
+- `GET /api/v1/products` - Product catalog with pagination and filters
+- `GET /api/v1/products/{id}` - Single product details
+- `GET /api/v1/cart` - User cart state
+- `POST /api/v1/cart/items` - Add item to cart
+- `PUT /api/v1/cart/items/{id}` - Update cart item
+- `DELETE /api/v1/cart/items/{id}` - Remove cart item
+- `POST /api/v1/cart/promo` - Apply promotional code
+- `GET /api/v1/orders` - User order history
+- `GET /api/v1/orders/{id}` - Order details
+- `GET /api/v1/orders/{id}/stream` - Real-time order status (SSE)
 
-**Accessibility & Resiliency:**
-- WCAG 2.1 AA compliance (contrast ratio 4.5:1, focus indicators)
-- Keyboard navigation for all interactive elements
-- Screen reader announcements for state changes (loading → success → error)
-- Graceful degradation: basic functionality without JavaScript (progressive enhancement)
+**API Response Patterns:**
+```typescript
+// Success response
+{
+  "data": { ... },
+  "meta": {
+    "timestamp": "2026-11-01T08:30:44Z",
+    "requestId": "req_123456",
+    "version": "v1"
+  },
+  "links": {
+    "self": "https://api.platform.com/v1/orders/123",
+    "next": "https://api.platform.com/v1/orders?cursor=abc123"
+  }
+}
+
+// Error response
+{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Invalid promo code",
+    "details": [
+      "Promo code expired",
+      "Not applicable to cart contents"
+    ]
+  },
+  "meta": {
+    "timestamp": "2026-11-01T08:30:44Z",
+    "requestId": "req_123457"
+  }
+}
+```
+
+#### Network Communication Protocols
+
+**Data Exchange Formats:**
+
+| Format | Use Case | Benefits | Limitations |
+|--------|----------|----------|-------------|
+| **JSON** | API communication, client-server | Human-readable, widely supported | Larger payload size |
+| **GraphQL** | Complex queries, reduced over-fetching | Precise data selection | Learning curve |
+| **Protocol Buffers** | High-performance services | Compact binary format | Schema evolution |
+
+**Transfer Protocols:**
+
+| Protocol | Primary Use | Characteristics |
+|----------|-------------|----------------|
+| **HTTP/HTTPS** | REST APIs, traditional web | Stateless, widely supported |
+| **WebSocket** | Real-time communication, SSE | Full-duplex, bi-directional |
+| **gRPC** | Internal microservice communication | Typed contracts, streaming |
+| **Server-Sent Events (SSE)** | Real-time updates | Simple, one-way communication |
+
+**Communication Architecture:**
+
+```typescript
+// API client configuration with protocol selection
+interface APIClientConfig {
+  baseURL: string;
+  protocols: CommunicationProtocol[];
+  timeouts: TimeoutConfig;
+  retryPolicy: RetryPolicy;
+  compression: CompressionType;
+}
+
+enum CommunicationProtocol {
+  REST = 'rest',
+  GRAPHQL = 'graphql',
+  WEBSOCKET = 'websocket',
+  SSE = 'sse',
+  GRPC = 'grpc'
+}
+```
+
+#### Performance Optimization (Enhanced)
+
+**Advanced Rendering Strategies:**
+- **Streaming SSR:** Partial hydration with Suspense boundaries
+- **Edge Computing:** Cloudflare Workers for API at edge
+- **Image Optimization:** Next.js Image component with custom loaders
+- **Font Optimization:** Next.js font optimization with subsetting
+
+**Advanced Caching:**
+- **HTTP Cache:** CDN-level caching with invalidation policies
+- **Service Worker:** Offline-first capabilities with background sync
+- **Application Cache:** IndexedDB-based persistent storage
+- **Session Cache:** In-memory caching with TTL management
+
+**Network Optimization:**
+```typescript
+// Advanced network configuration
+const networkConfig = {
+  // Connection optimization
+  connectionPoolSize: 50,
+  keepAlive: true,
+  timeout: 30000,
+  
+  // Request optimization
+  maxConcurrentRequests: 6,
+  requestDeduplication: true,
+  batchRequests: true,
+  
+  // Response optimization
+  compression: 'brotli',
+  cacheStrategy: 'stale-while-revalidate',
+  offlineFallback: true,
+  
+  // Monitoring
+  performanceTracking: true,
+  errorTracking: true,
+  analytics: true
+};
+```
+
+#### Accessibility & Resiliency
+
+**Accessibility Implementation:**
+- ARIA labels and roles for screen reader compatibility
+- Keyboard navigation support (Tab, Enter, Space, Escape)
+- High contrast mode and reduced motion preferences
+- Focus management for modal dialogs and overlays
+
+**Resilience Patterns:**
+- **Fallback Components:** Graceful degradation for failed API calls
+- **Skeleton Loading:** Visual loading states while data fetches
+- **Error Boundaries:** Component-level error isolation and recovery
+- **Offline Detection:** Network status monitoring and offline queue management
+
+#### Monitoring & Analytics
+
+**Performance Monitoring:**
+- Core Web Vitals tracking (FCP, LCP, TTI, CLS)
+- Custom metrics for business-critical operations
+- Real-time performance dashboards
+- Performance budgeting and alerts
+
+**Error Monitoring:**
+- Centralized error logging with correlation IDs
+- Performance error tracking and alerting
+- User behavior analytics
+- Automatic error reporting and grouping
+
+#### CI/CD Pipeline
+
+**Automated Testing:**
+- Unit tests with Jest/Mocha
+- Integration tests with Cypress/Supertest
+- Visual regression tests with Chromatic
+- Performance testing with Lighthouse CI
+
+**Deployment Automation:**
+- GitHub Actions for CI/CD pipeline
+- Containerized deployments with Docker/Kubernetes
+- Blue-green deployments with traffic shifting
+- Automated rollback on failure detection
+
+#### Internationalisation & Localisation
+
+**Multi-Language Support:**
+```typescript
+// i18n configuration
+const i18nConfig = {
+  defaultLocale: 'en',
+  supportedLocales: ['en', 'es', 'fr', 'de', 'it', 'pt'],
+  
+  // Regional formatting
+  formats: {
+    date: 'yyyy-MM-dd',
+    time: 'HH:mm:ss',
+    currency: 'USD',
+    number: { style: 'decimal' }
+  },
+  
+  // Translation loading
+  preload: true,
+  fallbackLng: 'en',
+  detection: {
+    order: ['localStorage', 'navigator', 'htmlTag'],
+    caches: ['localStorage']
+  }
+};
+```
+
+#### Security & Compliance
+
+**Authentication & Authorization:**
+- OAuth 2.0 with OpenID Connect
+- Role-based access control (RBAC)
+- Multi-factor authentication support
+- Session management with secure cookies
+
+**Data Protection:**
+- GDPR compliance for user data
+- PCI DSS for payment processing
+- Secure configuration management
+- Encryption for data in transit and at rest
+
+#### Versioning Strategy
+
+**API Versioning:**
+- URL-based versioning (`/api/v1/`, `/api/v2/`)
+- Semantic versioning for releases
+- Backward compatibility guarantees
+- Deprecation policies for older versions
+
+**Component Versioning:**
+- Component library versioning
+- Dependency management with semantic versioning
+- Breaking change notifications
+- Rollback capabilities for critical updates
+
+#### Progressive Web App (PWA) Features
+
+**Offline Capabilities:**
+- Service Worker for offline operation
+- IndexedDB for local data storage
+- Background sync for queued operations
+- Offline fallback pages and error states
+
+**Performance Optimizations:**
+- App manifest for home screen installation
+- Splash screen for app loading
+- Push notifications for updates
+- Battery optimization features
+
+---
+
+This comprehensive Layer 3 documentation now includes all the UI architecture requirements specified in your checklist, providing a complete specification for frontend system design, implementation, and deployment for the e-commerce microservices platform.
 
 ---
 
@@ -776,7 +1032,11 @@ FUNCTION checkServiceability(pincode, items, preferredDeliveryDate):
 
 ## LAYER 5: BACKEND & DISTRIBUTED SYSTEM ARCHITECTURE
 
-### 5.1 High-Level Data Flow
+**Dropbox System Design Architecture Adapted for E-Commerce**
+
+Dropbox's distributed system principles provide an excellent foundation for our microservices e-commerce platform. We'll implement the core architectural patterns while adapting them to our domain-specific requirements.
+
+### 5.1 High-Level Data Flow (Dropbox Pattern: Service-Oriented Architecture)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -815,68 +1075,55 @@ FUNCTION checkServiceability(pincode, items, preferredDeliveryDate):
                                     └────────────────┘
 ```
 
-**Request Lifecycle (Example: Product Search):**
+**Request Lifecycle (Example: Product Search - Dropbox Pattern Inspired):**
 
-1. **Config Server Bootstrap:** On service startup, each microservice contacts Config Server (`http://config-server:8888/{service-name}/{profile}`) to fetch environment-specific properties (DB URLs, Kafka brokers, feature flags). Properties are loaded into Spring `Environment` before application context refresh.
+1. **Config Server Bootstrap:** Similar to Dropbox, each microservice contacts Config Server at startup for environment properties, ensuring consistent configuration across all services.
 
-2. **Service Discovery Registration:** Each microservice registers with Eureka/Consul on startup, sending heartbeats every 30s. The API Gateway queries the discovery service to resolve service instances dynamically.
+2. **Service Discovery Registration:** Each microservice registers with Eureka/Consul and sends heartbeats every 30s (Dropbox pattern for service discovery).
 
 3. **Client Request:** Buyer sends `GET /api/v1/products?query=headphones` to API Gateway.
 
-4. **Gateway Authentication:** Gateway extracts JWT from `Authorization` header, validates signature against the auth service's JWKS endpoint, extracts `userId` and `roles`.
+4. **Gateway Authentication:** Gateway extracts and validates JWT using JWKS endpoint (OAuth2 Resource Server pattern from Dropbox).
 
-5. **Gateway Routing:** Gateway routes to Product Service instances (round-robin from discovery cache). For aggregation, gateway may also call Recommendations and Item services in parallel via `WebClient`.
+5. **Gateway Routing:** Gateway routes to Product Service instances with round-robin from discovery cache (Dropbox's service discovery pattern).
 
-6. **Domain Service Processing:** Product Service queries Elasticsearch for full-text search, enriches with product details from PostgreSQL, merges recommendations, checks stock via Item Service (gRPC).
+6. **Domain Service Processing:** Product Service queries Elasticsearch for full-text search, enriches with PostgreSQL, merges recommendations, checks stock via gRPC (efficient service communication pattern).
 
-7. **Database Read:** PostgreSQL for structured product data; Elasticsearch for search; Redis for hot stock cache.
+7. **Database Read:** PostgreSQL for structured data; Elasticsearch for search; Redis for hot stock cache (Dropbox's distributed storage pattern).
 
-8. **Response:** Gateway returns aggregated JSON to client with appropriate cache headers.
+8. **Response:** Gateway returns aggregated JSON with cache headers (efficient response aggregation from Dropbox).
 
 ---
 
-### 5.2 Database Topography & Storage with Enhanced Dropbox-Inspired Patterns
-
-| Microservice | Database Type | Technology | Rationale | Data Boundaries |
-|-------------|--------------|------------|-----------|-----------------|
-| **User** | Relational | PostgreSQL | ACID for auth, profiles, addresses; strong consistency required | Owns `users`, `addresses`, `user_entitlements` tables |
-| **Product** | Relational + Search + Chunk Service | PostgreSQL + Elasticsearch + Redis | ES for full-text search/facets; PG for inventory metadata; Redis for product image chunks and metadata | Owns `products`, `categories`, `product_variants`, `product_chunks` |
-| **Item Management** | Relational + Cache + Block Sync | PostgreSQL + Redis | Stock levels need consistency; Redis for hot stock reads; block-level sync for inventory updates | Owns `skus`, `stock_levels`, `reservations`, `inventory_blocks` |
-| **Cart** | NoSQL (Key-Value) + Delta Sync | Redis | High write volume, ephemeral data, TTL-based expiration; delta sync for cross-device consistency | Owns `cart:{userId}` hash with TTL 30 days, `cart_deltas` |
-| **Order** | Relational + Metadata Store | PostgreSQL + Redis | ACID for financial transactions; Redis metadata store for order status tracking and conflict resolution | Owns `orders`, `order_items`, `order_outbox`, `order_metadata` |
-| **Payment** | Relational + Blob Store | PostgreSQL + S3 | ACID for payment records; S3 for payment proof documents and receipts | Owns `payments`, `payment_webhooks`, `refunds`, `payment_blobs` |
-| **Notification** | Relational + Stream + Pub/Sub | PostgreSQL + Kafka | Message durability; Kafka for fan-out to email/SMS providers; pub/sub for real-time notifications | Owns `notifications`, `notification_templates`, `notification_subscriptions` |
-| **Offers** | Relational + Sequencer | PostgreSQL + Redis | Promo code rules, usage tracking, validity windows; Redis sequencer for unique promo code generation | Owns `promo_codes`, `offer_usage`, `discount_rules`, `promo_sequencer` |
-| **Review & Ratings** | Document + Sequencer | MongoDB + Redis | Flexible schema for reviews, ratings, vendor responses; Redis sequencer for review IDs | Owns `reviews`, `ratings`, `review_reactions` |
-| **Recommendations** | NoSQL + Cache + Sequencer | Redis + PostgreSQL + Redis | Collaborative filtering data in PG; hot recommendations in Redis; Redis sequencer for recommendation IDs | Owns `recommendations`, `user_behavior_events`, `rec_seq_counter` |
-| **Serviceability** | Relational + Sequencer | PostgreSQL + Redis | Pincode coverage, warehouse mapping, delivery SLAs; Redis sequencer for serviceability check IDs | Owns `serviceable_pincodes`, `warehouses`, `delivery_slas`, `service_checks` |
-| **Archival** | Object Storage + Cold DB + Sequencer | S3 + PostgreSQL (index) + Redis | Historical orders moved to S3 (Parquet/JSON), PG index for retrieval; Redis sequencer for archival IDs | Owns `archived_orders`, `order_archives`, `arch_seq_counter` |
+### 5.2 Database Topography & Storage (Dropbox Pattern: Metadata + Chunk Services)
 
 **Enhanced Data Boundary Enforcement (Dropbox Patterns):**
 
-1. **Metadata Service Pattern (Dropbox Pattern):**
+1. **Metadata Service Pattern (Dropbox's Metadata Service):**
    - Central Metadata Service manages metadata across all microservices
    - Contains file mappings, ownership, access controls, version history
    - Reduces cross-service coupling by centralizing metadata access
+   - **E-commerce adaptation:** Manages product catalogs, user preferences, order metadata
 
-2. **Chunk-Based Storage (Dropbox Pattern):**
+2. **Chunk-Based Storage (Dropbox's Chunk Service):**
    - Large files (product images, order documents) split into 4MB-10MB chunks
    - Each chunk uniquely identified by SHA-256 hash
    - Content-based addressing eliminates duplication (e.g., same product images across catalogs)
    - Implements resumable uploads and partial sync
+   - **E-commerce adaptation:** Product images, order receipts, user document uploads
 
-3. **Block-Level Sync Algorithm (Dropbox Pattern):**
+3. **Block-Level Sync Algorithm (Dropbox's Block-Level Sync):**
    - Cart and order state changes tracked at block level (micro-level updates)
    - Only modified blocks transmitted during synchronization between devices/services
    - Enables efficient conflict detection and resolution
    - Used for real-time cart updates across multiple user devices
 
-4. **Delta Synchronization (Dropbox Pattern):**
+4. **Delta Synchronization (Dropbox's Delta Sync):**
    - For cart state, stores only the differences (`delta`) between versions
    - Reduces network bandwidth and improves sync performance
    - Applied to user preferences, recommendations, and serviceability cache
 
-**Resource Estimation (Back-of-Envelope Calculations):**
+**Resource Estimation (Dropbox Pattern: Back-of-Envelope Calculations):**
 
 Assuming 50 million active users (MVU), average 2TB storage per user:
 
@@ -892,7 +1139,7 @@ Assuming 50 million active users (MVU), average 2TB storage per user:
 - Peak bandwidth (10x average): 25PB/month = ~833GB/s
 - Distributed across 3 data centers: ~278GB/s per data center
 
-**Server Estimation:**
+**Server Estimation (Dropbox Pattern):**
 - Assuming 64-core servers with 1PB storage and 10Gbps network:
   - Storage servers: 105PB ÷ 1PB = 105 servers
   - Network load balancers: 6 per data center × 3 data centers = 18 servers
@@ -902,9 +1149,9 @@ Assuming 50 million active users (MVU), average 2TB storage per user:
 
 ---
 
-### 5.3 Scalability, Caching & System Bottlenecks with Dropbox-Inspired Patterns
+### 5.3 Scalability, Caching & System Bottlenecks (Dropbox Pattern: Efficient Data Management)
 
-**Caching Strategy with Block-Level & Delta Sync:**
+**Caching Strategy with Block-Level & Delta Sync (Dropbox Patterns):**
 
 | Service | Cache Layer | Technology | TTL | Eviction Policy | Pattern |
 |---------|------------|------------|-----|-----------------|---------|
@@ -916,14 +1163,14 @@ Assuming 50 million active users (MVU), average 2TB storage per user:
 | API Gateway | Aggregated responses (non-user-specific) | Redis | 60s | LRU | Cache-Aside |
 | Metadata Service | Global file metadata, version tags | Redis | 120s | LRU | Pub/Sub notification + Invalidation |
 
-**Scalability Patterns with Chunk-Based Architecture:**
+**Scalability Patterns with Chunk-Based Architecture (Dropbox Pattern):**
 
 1. **Product Service (Read-Heavy + Chunk Service):**
    - Read replicas: 3x PostgreSQL read replicas for product catalog queries
    - Elasticsearch cluster: 3 nodes with 2 replicas per shard
    - Redis cache: 90% cache hit rate target for product detail page
    - **Chunk Service:** 4MB chunk storage for product images; SHA-256 hash-based deduplication; 30% storage reduction
-   - **Content Delivery:** CDN (CloudFront/AWS CloudFront) for static product images, signed URLs for temporary access
+   - **Content Delivery:** CDN for static product images, signed URLs for temporary access
 
 2. **Cart Service (Write-Heavy + Delta Sync):**
    - Redis cluster with sharding by `userId` hash
@@ -951,7 +1198,7 @@ Assuming 50 million active users (MVU), average 2TB storage per user:
    - **Metadata Version Vectors:** Vector clocks for distributed metadata consistency
    - **Pub/Sub Metadata Updates:** Real-time metadata propagation via Kafka topics
 
-**Event-Driven Streaming (Kafka) with Block-Level Updates:**
+**Event-Driven Streaming (Kafka) with Block-Level Updates (Dropbox Pattern):**
 
 | Topic | Producer | Consumers | Purpose | Block-Level |
 |-------|----------|-----------|---------|-------------|
@@ -989,7 +1236,7 @@ Assuming 50 million active users (MVU), average 2TB storage per user:
    - **Background metadata refresh:** Periodic sync (every 30s) from authoritative source
    - **Rate limiting:** 1000 metadata requests/min per service
 
-5. **Cross-Data Center Replication (3 DC Architecture):**
+5. **Cross-Data Center Replication (3 DC Architecture - Dropbox Pattern):**
    - **Active-Passive primary DC** with automatic failover
    - **Cross-DC Kafka MirrorMaker 2.** for geo-replication
    - **Chunk replication:** All product/image chunks replicated across all 3 data centers
@@ -1005,9 +1252,9 @@ Assuming 50 million active users (MVU), average 2TB storage per user:
 
 ---
 
-### 5.4 Security & Compliance with Dropbox-Inspired Patterns
+### 5.4 Security & Compliance with Dropbox Patterns
 
-**Authentication & Authorization (OAuth2 + mTLS + Service Mesh):**
+**Authentication & Authorization (OAuth2 + mTLS + Service Mesh - Dropbox Pattern):**
 
 1. **API Gateway (Entry Point) - Enhanced:**
    - **OAuth2 Resource Server** validates JWT access tokens with JWKS rotation every 24h
@@ -1033,7 +1280,7 @@ Assuming 50 million active users (MVU), average 2TB storage per user:
 }
 ```
 
-3. **Inter-Service Security (Zero Trust + mTLS):**
+3. **Inter-Service Security (Zero Trust + mTLS - Dropbox Pattern):**
    - **mTLS:** All service-to-service communication over mutual TLS (Istio service mesh with Envoy sidecars)
    - **Service Mesh Policies:** `DestinationRule` and `PeerAuthentication` enforcing STRICT mTLS
    - **Service Tokens:** Short-lived JWTs (5-minute TTL) for service-to-service calls, signed by SPIFFE/SPIRE
@@ -1046,7 +1293,7 @@ Assuming 50 million active users (MVU), average 2TB storage per user:
    - **Temporary Access Tokens:** Time-limited (1hr-7day) signed URLs for shared orders/carts
    - **Audit Trail:** All metadata access logged with user, action, timestamp, and IP
 
-**Configuration Security with Vault & Secret Rotation:**
+**Configuration Security with Vault & Secret Rotation (Dropbox Pattern):**
 
 1. **Central Config Server (Spring Cloud Config + HashiCorp Vault):**
    - **Git backend** encrypted with SOPS/Mozilla SOPS for at-rest encryption
