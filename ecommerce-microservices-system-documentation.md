@@ -892,249 +892,621 @@ FUNCTION evaluateServiceability(destinationPincode, cartItems, requestedPriority
 
 ---
 
-## LAYER 5: BACKEND & DISTRIBUTED SYSTEMS ARCHITECTURE
+## LAYER 5: BACKEND & DISTRIBUTED SYSTEMS ARCHITECTURE (GROKKING SYSTEM DESIGN BLUEPRINT)
 
-### 5.1 Global High-Level System Architecture
+This layer adapts the structured architectural framework popularized by the *Grokking the System Design Interview* curriculum (specifically the *Designing Dropbox / Distributed Cloud Storage* methodology), applying it rigorously to high-scale, event-driven e-commerce microservices. It covers back-of-the-envelope capacity estimations, component-level breakdowns, database partitioning and sharding, end-to-end data flows, concurrency control, caching tiers, load balancing, fault tolerance, and security.
+
+---
+
+### 5.1 High-Level Architecture & Component Blueprint
 
 ```
-┌────────────────────────────────────────────────────────────────────────────────────────┐
-│                              CLIENT TIER (Web, iOS, Android)                           │
-└───────────────────────────────────────────┬────────────────────────────────────────────┘
-                                            │ Anycast DNS / HTTPS (TLS 1.3)
-                                            ▼
-┌────────────────────────────────────────────────────────────────────────────────────────┐
-│               GLOBAL EDGE NETWORK (Cloudflare Enterprise CDN & WAF)                     │
-│  • DDoS Shield • Bot Mitigation • Static Asset Cache (Images/JS) • SSL Termination     │
-└───────────────────────────────────────────┬────────────────────────────────────────────┘
-                                            │ HTTP/2 & HTTP/3
-                                            ▼
-┌────────────────────────────────────────────────────────────────────────────────────────┐
-│             API GATEWAY & SECURITY PERIMETER (Spring Cloud Gateway / Envoy)            │
-│  • Distributed Token-Bucket Rate Limiter (Redis) • OAuth2 / JWKS Token Verification     │
-│  • Request Header Sanitization • W3C Trace Context Injection • Circuit Breaker Routing │
-└───────────────────────────────────────────┬────────────────────────────────────────────┘
-                                            │ Internal Service Mesh (Istio STRICT mTLS)
-        ┌───────────────────────────────────┼───────────────────────────────────┐
-        ▼                                   ▼                                   ▼
-┌───────────────────────┐       ┌───────────────────────┐       ┌───────────────────────┐
-│ PRODUCT CATALOG SVC   │       │ CART & SESSION SVC    │       │ ORDER SAGA ORCHESTR.  │
-│ OpenSearch + Mongo/PG │       │ Redis 7 Cluster       │       │ PostgreSQL 16 (ACID)  │
-└───────────┬───────────┘       └───────────┬───────────┘       └───────────┬───────────┘
-            │                               │                               │
-            │                               │ gRPC Binary                   │ Debezium CDC
-            ▼                               ▼                               ▼
-┌───────────────────────┐       ┌───────────────────────┐       ┌───────────────────────┐
-│ ITEM & INVENTORY SVC  │       │ OFFERS & PROMO SVC    │       │ PAYMENT & LEDGER SVC  │
-│ Redis Lua + PostgreS  │       │ Redis + PostgreS      │       │ PostgreSQL Primary/Stby│
-└───────────┬───────────┘       └───────────┬───────────┘       └───────────┬───────────┘
-            │                               │                               │
-            └───────────────────────────────┼───────────────────────────────┘
-                                            ▼
-┌────────────────────────────────────────────────────────────────────────────────────────┐
-│               ENTERPRISE EVENT BUS (Apache Kafka Multi-AZ Cluster)                     │
-│   Topics: order.events · payment.events · inventory.events · notification.events        │
-└───────┬───────────────────────────┬───────────────────────────┬────────────────────────┘
-        │                           │                           │
-        ▼                           ▼                           ▼
-┌───────────────┐           ┌───────────────┐           ┌───────────────┐
-│ NOTIFICATION  │           │ RECOMMENDATION│           │ ARCHIVAL &    │
-│ ENGINE        │           │ ENGINE (Flink)│           │ COMPLIANCE    │
-│ SendGrid/Twil │           │ Redis + Python│           │ S3 / Parquet  │
-└───────────────┘           └───────────────┘           └───────────────┘
+┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                CLIENT TIER (Web, iOS, Android App)                              │
+└────────────────────────────────────────────────┬────────────────────────────────────────────────┘
+                                                 │ Anycast DNS / HTTPS (TLS 1.3)
+                                                 ▼
+┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                        GLOBAL LOAD BALANCER & CDN (Cloudflare Enterprise / Route 53)            │
+│  • Anycast Geo-Routing • DDoS / WAF Shield • Edge Static Caching • SSL Termination              │
+└────────────────────────────────────────────────┬────────────────────────────────────────────────┘
+                                                 │ L4 / L7 Ingress (TCP / HTTP/2)
+                                                 ▼
+┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                       API GATEWAY & REVERSE PROXY TIER (Envoy / Spring Cloud Gateway)           │
+│  • Global Rate Limiter (Token-Bucket) • OAuth2 / JWKS Token Verification • W3C Trace Injection  │
+│  • Request Header Sanitization • Request Aggregation / BFF • Circuit Breaker Routing            │
+└────────────────────────────────────────────────┬────────────────────────────────────────────────┘
+                                                 │ Internal Service Mesh (Istio STRICT mTLS)
+        ┌────────────────────────────────────────┼────────────────────────────────────────┐
+        ▼                                        ▼                                        ▼
+┌─────────────────────────┐            ┌─────────────────────────┐            ┌─────────────────────────┐
+│  PRODUCT CATALOG PODS   │            │   CART & SESSION PODS   │            │  ORDER SAGA ORCHESTRATOR│
+│  (Read-Heavy CQRS Node) │            │   (Low-Latency Session) │            │  (ACID Transaction Core)│
+└────────────┬────────────┘            └────────────┬────────────┘            └────────────┬────────────┘
+             │                                      │                                      │
+             │ Read-Model Query                     │ In-Memory Aggregates                 │ Two-Phase Saga
+             ▼                                      ▼                                      ▼
+┌─────────────────────────┐            ┌─────────────────────────┐            ┌─────────────────────────┐
+│  OPENSEARCH 2.13 CLUSTER│            │  REDIS 7 CLUSTER (SHARD)│            │  POSTGRESQL 16 (PRIMARY)│
+│  • Inverted Indices     │            │  • Cart Hashes (30d TTL)│            │  • Order State Machine  │
+│  • Faceted Aggregations │            │  • Hot Stock Counters   │            │  • Transactional Outbox │
+└─────────────────────────┘            └─────────────────────────┘            └────────────┬────────────┘
+                                                                                           │
+                                                                                           │ Debezium CDC
+                                                                                           ▼
+┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                        DISTRIBUTED MESSAGE BROKER & EVENT BUS (Apache Kafka)                    │
+│   Topics: order.events · payment.events · inventory.events · notification.events · cart.deltas  │
+└──────────────┬───────────────────────────┬───────────────────────────┬──────────────────────────┘
+               │                           │                           │
+               ▼                           ▼                           ▼
+┌─────────────────────────────┐ ┌─────────────────────────────┐ ┌─────────────────────────────┐
+│    INVENTORY LEDGER SVC     │ │     PAYMENT LEDGER SVC      │ │    NOTIFICATION ENGINE      │
+│  • PostgreSQL Master/Repl   │ │  • Double-Entry DB          │ │  • Multi-Provider Routing   │
+│  • Redis Atomic Lua Leases  │ │  • Stripe / Razorpay Webhook│ │  • Priority Push / SMS / Mail│
+└─────────────────────────────┘ └─────────────────────────────┘ └─────────────────────────────┘
+```
+
+#### Detailed Breakdown of Core Architectural Components
+
+1. **Client Tier (Web, iOS, Android):**
+   * Acts as the presentation layer executing responsive rendering, managing local cache state (TanStack Query / Zustand), and running optimistic UI mutations.
+   * Maintains persistent Server-Sent Events (SSE) connections for order state tracking and bidirectional WebSockets for high-contention flash-sale updates.
+
+2. **Global Load Balancer & Edge CDN (Cloudflare Enterprise / AWS CloudFront):**
+   * Employs Anycast DNS routing to direct user requests to the geographically closest Point of Presence (PoP).
+   * Caches static product media (images, catalog snapshots, brand assets) at the edge with a targeted 98% cache hit ratio.
+   * Serves as Layer 3/4 DDoS protection and Web Application Firewall (WAF) mitigating automated credential-stuffing and scraping bots.
+
+3. **API Gateway & Reverse Proxy Tier (Envoy / Spring Cloud Gateway):**
+   * Single ingress gatekeeper providing SSL termination, path-based routing, distributed rate limiting (via Redis Token-Bucket), and JWT authentication via JWKS public key verification.
+   * Enforces cross-cutting concerns: correlation ID injection (`X-Correlation-ID`), W3C TraceContext propagation (`traceparent`), request hedging, and circuit breaking via Resilience4j.
+
+4. **Product Catalog & Metadata Service (CQRS Model):**
+   * Follows Command Query Responsibility Segregation (CQRS).
+   * **Write Path:** Vendors update product schemas in PostgreSQL (authoritative transactional store).
+   * **Read Path:** A Change Data Capture (CDC) pipeline streams catalog changes to an OpenSearch 2.13 cluster, serving full-text searches, autocomplete, and faceted category filters at sub-50ms latency.
+
+5. **Cart & Session Service:**
+   * High-throughput, low-latency microservice managing temporary and persistent cart aggregates.
+   * Stores active cart data in a Redis 7 Cluster partitioned by `user_id`. Supports seamless merging of unauthenticated guest carts with user profiles upon login.
+
+6. **Order Saga Orchestrator:**
+   * Manages the life-cycle of distributed order placements via a stateful, forward-recovering Orchestrated Saga state machine.
+   * Coordinates multi-service transactions across Inventory, Offers, and Payment services with guaranteed compensation rollbacks on failure.
+
+7. **Atomic Inventory & Allocation Engine:**
+   * Implements a two-tier inventory architecture: an in-memory Redis cluster for atomic test-and-decrement reservations (using Lua scripts during flash sales) and a durable PostgreSQL ledger for physical Available-To-Promise (ATP) tracking.
+
+8. **Payment & Double-Entry Settlement Ledger:**
+   * Integrates with external payment gateways (Stripe, Adyen, Razorpay) under PCI DSS Level 1 SAQ-A tokenization.
+   * Records all monetary movements inside an immutable, auditable double-entry accounting ledger database (`ledger_entries`) to guarantee zero balance drift.
+
+9. **Distributed Message Broker (Apache Kafka Multi-AZ):**
+   * Serves as the central asynchronous nervous system of the enterprise.
+   * Distributes high-throughput domain events (`OrderPlaced`, `StockReserved`, `PaymentCaptured`, `OrderDelivered`) with strict partition ordering keyed by `order_id` or `sku_id`.
+
+10. **Notification & Event-Sync Engine:**
+    * Consumes domain events from Kafka and dispatches priority notifications across email (SendGrid), SMS (Twilio), mobile push (Firebase Cloud Messaging), and WhatsApp Business API.
+
+11. **Cold Archival & Compliance Lakehouse (Apache Iceberg + S3 / Glacier):**
+    * Ingests historical orders, payment transactions, and audit logs older than 90 days from PostgreSQL into compressed Parquet format on AWS S3, queryable via Trino/Athena for 7-year regulatory compliance.
+
+---
+
+### 5.2 Capacity Estimation & Constraints (Back-of-the-Envelope Calculations)
+
+Following the standard Grokking System Design methodology, we formulate explicit operational assumptions to derive traffic, storage, network bandwidth, memory/caching, and server instance requirements.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                 CAPACITY ESTIMATION SUMMARY                                     │
+├──────────────────────────┬──────────────────────────┬───────────────────────────────────────────┤
+│ Dimension                │ Baseline Value           │ Flash-Sale Peak Value                     │
+├──────────────────────────┼──────────────────────────┼───────────────────────────────────────────┤
+│ Total Registered Users   │ 50,000,000 users         │ 50,000,000 users                          │
+│ Daily Active Users (DAU) │ 5,000,000 users          │ 12,000,000 users                          │
+│ Peak Concurrent Users    │ 50,000 connections       │ 100,000 connections                       │
+│ Average Daily Orders     │ 500,000 orders/day       │ 2,000,000 orders/day                      │
+│ Order Creation Throughput│ 6 orders/sec (average)   │ 1,000 orders/sec (peak TPS)               │
+│ Catalog Read Throughput  │ 3,000 QPS (average)      │ 50,000 QPS (peak search/browse)           │
+│ Daily Transactional Data │ 2.0 GB / day             │ 8.0 GB / day                              │
+│ 5-Year Database Storage  │ 3.65 TB (Order Tables)   │ ~10 TB (with indices & historical logs)   │
+│ Hot Working Cache (RAM)  │ 22.5 GB (Active Carts)   │ 150 GB (Active Carts + 20% Catalog Cache) │
+│ Ingress / Egress Network │ 500 Mbps / 1.5 Gbps      │ 2.0 Gbps / 6.0 Gbps                       │
+└──────────────────────────┴──────────────────────────┴───────────────────────────────────────────┘
+```
+
+#### Step 1: Traffic Estimations
+* **Total Registered Accounts:** $50\text{ Million}$.
+* **Daily Active Users (DAU):** $5\text{ Million}$ (10% of total registered user base).
+* **Average Daily Completed Orders:** $500,000\text{ orders/day}$.
+$$\text{Average Order TPS} = \frac{500,000\text{ orders}}{86,400\text{ seconds}} \approx 5.8\text{ orders/sec} \approx 6\text{ TPS}$$
+* **Peak Flash-Sale Velocity:** During a nationwide flash sale, order placement spikes by a factor of $\approx 170\times$ baseline:
+$$\text{Peak Transaction Throughput} = 1,000\text{ Orders/sec (TPS)}$$
+* **Browse-to-Buy Ratio:** For every completed checkout, a user executes approximately 50 catalog read interactions (product searches, category browsing, variant selection, reviews):
+$$\text{Peak Catalog Read QPS} = 1,000\text{ TPS} \times 50 = 50,000\text{ QPS}$$
+
+#### Step 2: Storage Estimations
+1. **Order Record Sizing:**
+   * Order Header (IDs, status, timestamps, customer ID, version): $256\text{ bytes}$.
+   * Line Items (average 3 items per order @ $128\text{ bytes}$ each): $384\text{ bytes}$.
+   * Financial Summary & Tax Breakdown: $128\text{ bytes}$.
+   * Immutable Shipping Address Snapshot (JSONB): $512\text{ bytes}$.
+   * Audit trail & status history: $512\text{ bytes}$.
+   * **Total Order Storage per Record:** $\approx 1.74\text{ KB} \rightarrow \text{Assume } 2.0\text{ KB}$ (to account for table overhead and B-tree indexing).
+2. **Annual Transactional Growth:**
+   * Daily Order Storage: $500,000 \times 2.0\text{ KB} = 1.0\text{ GB/day}$.
+   * Adding payment transactions, outbox records, and audit logs ($2.0\text{ KB}$): Total transactional storage $= 2.0\text{ GB/day}$.
+   * Annual Relational Storage: $2.0\text{ GB} \times 365 = 730\text{ GB/year}$.
+   * **5-Year Relational Projection:** $730\text{ GB} \times 5 = 3.65\text{ TB}$.
+3. **Product Catalog Storage:**
+   * $10,000,000\text{ SKUs}$ in system.
+   * Product Metadata (Attributes, descriptions, categories, vendor mappings): $2.0\text{ KB/SKU}$.
+   * Primary Catalog Database Size: $10\text{M} \times 2.0\text{ KB} = 20\text{ GB}$.
+   * OpenSearch Search Indices (inverted text indices, embeddings, and facets with $2\times$ index overhead): $\approx 120\text{ GB}$.
+4. **Media & Image Asset Storage:**
+   * $10,000,000\text{ SKUs} \times 4\text{ images per SKU} = 40,000,000\text{ images}$.
+   * Average optimized WebP/AVIF image size: $400\text{ KB}$.
+   * **Total Media Storage:** $40,000,000 \times 400\text{ KB} = 16,000,000\text{ MB} = 16\text{ TB}$.
+   * Replicated across 3 multi-region S3 buckets with $98\%$ edge CDN offload.
+
+#### Step 3: Network Bandwidth Estimations
+* **Ingress (Write / Mutating Traffic):**
+  * Peak $1,000\text{ TPS}$ checkout calls $+$ $5,000\text{ QPS}$ cart modifications $= 6,000\text{ write req/sec}$.
+  * Average JSON payload size: $2\text{ KB}$.
+$$\text{Ingress Throughput} = 6,000 \times 2\text{ KB} = 12\text{ MB/s} = 96\text{ Mbps}$$
+* **Egress (Catalog Read / Search Traffic):**
+  * Peak catalog reads: $50,000\text{ QPS}$.
+  * Average compressed JSON catalog response: $15\text{ KB}$.
+$$\text{Origin Egress Bandwidth} = 50,000 \times 15\text{ KB} = 750\text{ MB/s} = 6.0\text{ Gbps}$$
+  * With an Edge CDN cache hit ratio of $80\%$ for dynamic catalog queries:
+$$\text{Backend Origin Ingress/Egress} = 6.0\text{ Gbps} \times 0.20 = 1.2\text{ Gbps (Manageable)}$$
+
+#### Step 4: Memory & Caching Estimations (Pareto 80/20 Rule)
+* Following the 80-20 rule, $20\%$ of product catalog SKUs generate $80\%$ of read traffic.
+* Hot SKU Catalog Cache: $20\% \text{ of } 10\text{M SKUs} = 2,000,000\text{ SKUs}$.
+  * Cache entry size: $2.0\text{ KB}$.
+  * Catalog Cache RAM: $2\text{M} \times 2.0\text{ KB} = 4.0\text{ GB}$.
+* Active User Cart Working Set:
+  * $5,000,000\text{ DAU}$, with approximately $30\%$ having an active shopping cart at any time: $1,500,000\text{ active carts}$.
+  * Cart payload footprint in Redis: $1.5\text{ KB}$.
+  * Active Cart Working RAM: $1,500,000 \times 1.5\text{ KB} = 2.25\text{ GB}$.
+  * Adding $3\times$ replication factor and Redis memory allocator overhead ($\approx 2\times$):
+$$\text{Total Dedicated Redis RAM} \approx (4.0\text{ GB} + 2.25\text{ GB}) \times 3 \times 2 = 37.5\text{ GB}$$
+
+#### Step 5: High-Level Server & Pod Sizing
+* **API Gateway Pods:** 1 Envoy pod handles $5,000\text{ QPS}$ of TLS termination and header routing.
+  * Needed for $50,000\text{ QPS}$: $50,000 / 5,000 = 10\text{ pods}$ (scaled to 16 with $N+2$ redundancy).
+* **Order Processing Pods:** 1 Spring Boot / Kotlin pod handles $100\text{ complex Saga TPS}$.
+  * Needed for $1,000\text{ peak TPS}$: $1,000 / 100 = 10\text{ pods}$ (scaled to 15 under HPA).
+* **Kafka Cluster:** 5-node broker cluster on AWS `i3en.2xlarge` instances with NVMe SSDs providing up to $2.5\text{ Gbps}$ dedicated network bandwidth and $> 50,000\text{ IOPS}$.
+
+---
+
+### 5.3 Database Design & Data Partitioning (Sharding Strategy)
+
+In accordance with Grokking principles, selecting an optimal database engine and partitioning scheme is essential to avoid single points of bottleneck and hot partitions.
+
+#### 5.3.1 Database Technology Selection Rationale
+
+| Domain Module | Storage Engine | Storage Paradigm | Engineering Rationale | Alternative Considered & Rejected |
+| :--- | :--- | :--- | :--- | :--- |
+| **Order Processing** | PostgreSQL 16 | Relational (ACID) | Strict transaction isolation; complex joins across line items; deterministic state machine transitions. | **MongoDB:** Rejected due to lack of native multi-document distributed transaction isolation across shards. |
+| **Payment Ledger** | PostgreSQL 16 | Relational (Double-Entry)| ACID compliance; immutable debit/credit balancing constraints; zero tolerance for phantom writes. | **Cassandra:** Rejected due to eventual consistency model creating potential financial ledger drift. |
+| **Product Catalog** | OpenSearch 2.13 | Search Index / Document | Inverted indices; sub-50ms full-text fuzzy queries; faceted category filtering; geo-distance ranking. | **PostgreSQL Full-Text:** Rejected due to severe CPU degradation under 50k QPS faceted search. |
+| **Cart & Sessions** | Redis 7 Cluster | In-Memory Key-Value | Sub-2ms read/write latency; native TTL expiration; atomic hash operations (`HSET`, `HDEL`, `HEXISTS`). | **DynamoDB:** Rejected due to higher P99 tail latency (10-15ms) and cold-start connection penalties. |
+| **Inventory Token Leases**| Redis 7 Cluster | In-Memory (Lua Engine)| Atomic test-and-decrement execution via single-threaded Lua; prevents overselling without DB locks. | **RDBMS Row Locks (`FOR UPDATE`):** Rejected due to database connection pool exhaustion at 1k TPS. |
+| **Review & Ratings** | MongoDB 7.0 | Document Store | Unstructured user reviews; nested vendor responses; high write tolerance; horizontal sharding. | **PostgreSQL:** Usable, but document store provides cleaner embedded schema for polymorphic reviews. |
+| **Historical Archival**| Apache Iceberg / S3 | Columnar Parquet | Cost-efficient cold storage ($0.004/GB/mo); high-throughput analytical scans via Trino/Athena. | **Active PostgreSQL Tables:** Rejected because tables $> 500\text{M}$ rows degrade B-Tree index cache efficiency. |
+
+---
+
+#### 5.3.2 Sharding & Partitioning Schemes
+
+To scale the Order and Cart databases beyond the capacity of a single physical server, we evaluate three partitioning strategies:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                               DATABASE SHARDING STRATEGY COMPARISON                             │
+├─────────────────────┬───────────────────────────┬───────────────────────────┬───────────────────┤
+│ Sharding Key        │ Advantages                │ Disadvantages             │ Selection Verdict │
+├─────────────────────┼───────────────────────────┼───────────────────────────┼───────────────────┤
+│ **By User ID**      │ All orders, carts, and    │ Unbalanced shards if      │ **SELECTED FOR    │
+│ `hash(user_id) % N` │ profiles for a user reside│ "power buyers" emerge;    │ CARTS & SESSIONS**│
+│                     │ on a single node.         │ cross-user queries slow.  │                   │
+├─────────────────────┼───────────────────────────┼───────────────────────────┼───────────────────┤
+│ **By Order ID**     │ Completely uniform write  │ Retrieving a user's order │ **REJECTED AS     │
+│ `hash(order_id) % N`│ distribution across all   │ history requires querying │ STANDALONE KEY**  │
+│                     │ physical shards.          │ all N shards (Scatter-    │                   │
+│                     │                           │ Gather problem).          │                   │
+├─────────────────────┼───────────────────────────┼───────────────────────────┼───────────────────┤
+│ **By Creation Date**│ Trivially easy to drop or │ Extreme write skew: 100%  │ **SELECTED FOR    │
+│ `RANGE(created_at)` │ archive old data; natural │ of writes hit the current │ TABLE PARTITIONING│
+│                     │ temporal locality.        │ day/month partition.      │ INSIDE POSTGRES** │
+└─────────────────────┴───────────────────────────┴───────────────────────────┴───────────────────┘
+```
+
+#### Production Partitioning Architecture: Hybrid Model
+To obtain the advantages of uniform distribution while preventing scatter-gather penalties:
+
+1. **Relational Database (PostgreSQL Orders): Range + Hash Partitioning**
+   * Primary table is partitioned by **RANGE (`created_at`)** on a monthly basis.
+   * Within each monthly partition, data is partitioned by **HASH (`customer_id`)** across 16 physical tables.
+   * Queries fetching a user's recent orders route directly to the specific partition of the current month without scanning historical data.
+   * Old partitions ($> 90\text{ days}$) are detached via `ALTER TABLE ... DETACH PARTITION` and offloaded to the S3 Iceberg lakehouse with zero database downtime.
+
+2. **Redis Cluster: Consistent Hashing with 16,384 Hash Slots**
+   * Key pattern: `{user:usr_12345}:cart` and `{sku:SKU_99887}:stock`.
+   * The `{...}` hash tag forces all related sub-keys to map to the exact same hash slot:
+$$\text{Hash Slot} = \text{CRC16}(\text{"user:usr\_12345"}) \pmod{16384}$$
+   * Enables multi-key atomic transactions (`MGET`, `EVALSHA`) on a single Redis node without cross-node network hops.
+
+#### 5.3.3 Mitigating Hot Partitions & Skew (The Flash-Sale SKU Problem)
+When $50,000$ concurrent buyers attempt to purchase a single viral product, standard hash partitioning routes all requests to a single Redis node or database partition, creating a catastrophic hot spot.
+
+**Production Mitigation Strategies:**
+1. **Virtual Key Salting for Read Hotspots:**
+   * High-traffic catalog items are replicated across $K=16$ cache keys: `sku:SKU_101:replica_1`, `sku:SKU_101:replica_2`, ..., `sku:SKU_101:replica_16`.
+   * Read requests select a random salt: `sku:SKU_101:replica_` + `random(1, 16)`, balancing read traffic equally across all Redis cluster nodes.
+2. **Stock Reservation Chunking (Distributed Token Leases):**
+   * If 1,000 units of a hot item are available, inventory is split across 10 virtual buckets of 100 units each:
+     * `stock:SKU_101:bucket_1 = 100`
+     * `stock:SKU_101:bucket_2 = 100`
+     * ...
+     * `stock:SKU_101:bucket_10 = 100`
+   * Inbound checkout requests hash their `userId` to a bucket. Contention drops by a factor of 10. If a bucket exhausts its units, the allocator redistributes surplus units from neighboring buckets.
+
+---
+
+### 5.4 Detailed End-to-End Distributed Data Flows
+
+#### Flow 1: Read Path (Faceted Search & Catalog Exploration)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Buyer as Client Browser / Mobile
+    participant Edge as Cloudflare CDN (Edge)
+    participant GW as API Gateway (Envoy)
+    participant Cat as Catalog Service
+    participant OS as OpenSearch Cluster
+    participant Redis as Redis Cache (Hot SKUs)
+
+    Buyer->>Edge: GET /api/v1/products/search?category=audio&brand=Sony
+    alt Edge Cache Hit (P99 < 15ms)
+        Edge-->>Buyer: 200 OK (Cached JSON payload)
+    else Edge Cache Miss
+        Edge->>GW: Forward Request
+        GW->>GW: Validate JWT & Rate-Limit Check
+        GW->>Cat: Route to Catalog Service Instance
+        Cat->>Redis: Check L2 Cache (key: search:hash_params)
+        alt L2 Cache Hit (P99 < 25ms)
+            Redis-->>Cat: Cached Search Result
+        else L2 Cache Miss
+            Cat->>OS: Execute Filtered Bool Query + Facet Aggs
+            OS-->>Cat: Top 20 SKUs + Facet Counts (P99 < 60ms)
+            Cat->>Redis: Asynchronously Populate Cache (TTL: 60s)
+        end
+        Cat-->>GW: Enriched Search Response
+        GW-->>Edge: 200 OK (Cache-Control: public, max-age=30, s-maxage=60)
+        Edge-->>Buyer: Render Search Page
+    end
+```
+
+#### Flow 2: Write Path (Flash-Sale Stock Reservation & Order Placement)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Buyer as Buyer
+    participant GW as API Gateway
+    participant Order as Order Saga Orchestrator
+    participant Redis as Redis Inventory Cluster
+    participant DB as PostgreSQL (Orders Primary)
+    participant Kafka as Kafka Event Bus
+    participant Pay as Payment Service
+
+    Buyer->>GW: POST /api/v1/orders/checkout (IdempotencyKey: idemp_998)
+    GW->>Order: Forward Order Intent
+    Order->>Order: Check Idempotency Table in PostgreSQL
+    Order->>Redis: Execute Atomic Lua Reservation (SKU, Qty=1, TTL=600s)
+    alt Stock Out (Lua returns 0)
+        Redis-->>Order: INSUFFICIENT_STOCK
+        Order-->>GW: 409 Conflict (Item Sold Out)
+        GW-->>Buyer: Toast: "Product Sold Out"
+    else Stock Reserved (Lua returns 1)
+        Redis-->>Order: RESERVATION_SUCCESS (Token: lease_771)
+        Order->>DB: INSERT into orders (status=INVENTORY_RESERVED) + outbox
+        DB-->>Order: Transaction Committed (ACID)
+        Order->>Pay: Initiate Payment Intent (Amount: ₹4,999)
+        Pay-->>Order: Payment Intent Ready (ClientSecret)
+        Order-->>GW: 201 Created (Order ID, Payment Secret)
+        GW-->>Buyer: Launch Payment Gateway Modal (3D Secure)
+    end
+```
+
+#### Flow 3: Asynchronous Event Propagation & Sync Path (Transactional Outbox)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant DB as PostgreSQL (Orders DB)
+    participant WAL as PostgreSQL Write-Ahead Log
+    participant Deb as Debezium CDC Connector
+    participant Kafka as Apache Kafka Broker
+    participant Notif as Notification Consumer
+    participant Arch as Archival Consumer
+    participant Flink as Real-Time Analytics (Flink)
+
+    Note over DB,WAL: Local ACID Transaction commits Order + Outbox record
+    DB->>WAL: Append Commit Record
+    WAL->>Deb: Stream WAL Changes (Logical Decoding)
+    Deb->>Kafka: Publish to order.events (Key: order_id)
+    par Parallel Event Consumption
+        Kafka->>Notif: Read OrderConfirmedEvent
+        Notif->>Notif: Dispatch Email / SMS Confirmation to Buyer
+    and
+        Kafka->>Arch: Read OrderConfirmedEvent
+        Arch->>Arch: Buffer in Micro-Batch for S3 Parquet Flush
+    and
+        Kafka->>Flink: Read OrderConfirmedEvent
+        Flink->>Flink: Update Real-Time Merchant GMV Dashboard
+    end
 ```
 
 ---
 
-### 5.2 Polyglot Persistence & Database Topography
+### 5.5 Concurrency Control, Conflict Resolution & Edge Cases
 
-Under the **Database-per-Service** architectural pattern, each microservice encapsulates its own persistent store with zero cross-database queries:
+Distributed e-commerce systems face severe concurrency hazards, including simultaneous stock allocations, duplicate payment authorizations, and race conditions between cancellations and fulfillment.
+
+#### 5.5.1 Concurrency Hazards & Mitigation Matrix
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────────────────┐
-│                              POLYGLOT PERSISTENCE TOPOLOGY                              │
-├────────────────────┬────────────────────┬────────────────────┬──────────────────────────┤
-│ Microservice       │ Primary Store      │ Secondary / Cache  │ Rationale & SLA          │
-├────────────────────┼────────────────────┼────────────────────┼──────────────────────────┤
-│ Product Catalog    │ PostgreSQL 16      │ OpenSearch 2.13    │ CQRS: Writes to RDBMS;   │
-│                    │ (Master Catalog)   │ (Search & Facets)  │ CDC to OpenSearch index  │
-├────────────────────┼────────────────────┼────────────────────┼──────────────────────────┤
-│ Item & Inventory   │ PostgreSQL 16      │ Redis 7 Cluster    │ Redis Lua for sub-5ms    │
-│                    │ (Ledger History)   │ (Atomic Counters)  │ flash reservation; RDBMS │
-├────────────────────┼────────────────────┼────────────────────┼──────────────────────────┤
-│ Cart & Session     │ Redis 7 Cluster    │ RocksDB / AWS S3   │ In-memory hash sets with │
-│                    │ (Sharded by User)  │ (Abandoned Carts)  │ 30-day TTL; sub-2ms R/W  │
-├────────────────────┼────────────────────┼────────────────────┼──────────────────────────┤
-│ Order Processing   │ PostgreSQL 16      │ Redis              │ Strict ACID; table       │
-│                    │ (Multi-AZ Replica) │ (Read-Through)     │ partition by created_at  │
-├────────────────────┼────────────────────┼────────────────────┼──────────────────────────┤
-│ Payment & Ledger   │ PostgreSQL 16      │ None (Strict ACID) │ Double-entry bookkeeping │
-│                    │ (Sync Standby)     │                    │ Financial auditability   │
-├────────────────────┼────────────────────┼────────────────────┼──────────────────────────┤
-│ User & IAM         │ PostgreSQL 16      │ Redis (JWKS & Auth)│ OAuth token revocation   │
-├────────────────────┼────────────────────┼────────────────────┼──────────────────────────┤
-│ Offers & Promos    │ PostgreSQL 16      │ Redis (Rate Caps)  │ Atomic usage counters    │
-├────────────────────┼────────────────────┼────────────────────┼──────────────────────────┤
-│ Serviceability     │ PostgreSQL PostGIS │ Redis (Geo Index)  │ H3 hexagonal geospatial  │
-├────────────────────┼────────────────────┼────────────────────┼──────────────────────────┤
-│ Review & Ratings   │ MongoDB 7.0        │ Redis (Hot Reviews)│ Flexible review schema   │
-├────────────────────┼────────────────────┼────────────────────┼──────────────────────────┤
-│ Data Archival      │ Apache Iceberg     │ AWS S3 / Glacier   │ Parquet cold partitions  │
-└────────────────────┴────────────────────┴────────────────────┴──────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                              CONCURRENCY HAZARDS & MITIGATIONS                                  │
+├─────────────────────┬───────────────────────────┬───────────────────────────────────────────────┤
+│ Concurrency Hazard  │ Root Cause Trigger        │ Technical Mitigation Architecture             │
+├─────────────────────┼───────────────────────────┼───────────────────────────────────────────────┤
+│ **Stock Overselling │ 10,000 requests attempt to│ In-memory atomic Lua scripts in Redis Cluster;│
+│ (Phantom Stock)**   │ decrement counter $\le 0$.│ zero database lock wait; token expires in 10m.│
+├─────────────────────┼───────────────────────────┼───────────────────────────────────────────────┤
+│ **Duplicate Payment │ User clicks "Pay" twice;  │ `Idempotency-Key` HTTP header cached in Redis │
+│ Debiting**          │ payment gateway retries.  │ with `SETNX` (TTL: 120s); unique DB index.    │
+├─────────────────────┼───────────────────────────┼───────────────────────────────────────────────┤
+│ **Concurrent Order  │ User cancels order while  │ Optimistic Locking via `@Version` column in   │
+│ Update Race**       │ merchant clicks "Ship".   │ PostgreSQL; stale version mutation throws     │
+│                     │                           │ `OptimisticLockException` $\rightarrow$ Rollback.     │
+├─────────────────────┼───────────────────────────┼───────────────────────────────────────────────┤
+│ **Dual-Write Event  │ Database commits, but pod │ Transactional Outbox Pattern + Debezium CDC;  │
+│ Inconsistency**     │ crashes before Kafka send.│ events committed atomically to DB WAL.        │
+└─────────────────────┴───────────────────────────┴───────────────────────────────────────────────┘
+```
+
+#### 5.5.2 Idempotency Key Implementation Mechanism
+Every mutating request (order creation, payment submission, refund initiation) must include a unique `Idempotency-Key` (UUIDv4) header:
+
+1. **Gatekeeper Check (Redis `SETNX`):**
+   * The API Gateway / Order Service executes:
+     ```redis
+     SET idempotency:ord_9988 "IN_PROGRESS" EX 120 NX
+     ```
+   * If key already exists, the service pauses and polls the key or returns a `409 Conflict / 425 Too Early` response.
+2. **Authoritative Persistence (PostgreSQL):**
+   * An `idempotency_records` table holds the final HTTP response status code and JSON payload:
+     ```sql
+     CREATE TABLE idempotency_records (
+         idempotency_key VARCHAR(128) PRIMARY KEY,
+         resource_id VARCHAR(64) NOT NULL,
+         status_code INT NOT NULL,
+         response_payload JSONB NOT NULL,
+         created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+     );
+     ```
+   * If an identical request arrives within 24 hours, the service immediately replays the cached `response_payload` with the recorded `status_code` without re-executing business logic.
+
+---
+
+### 5.6 Multi-Tier Caching Architecture
+
+To achieve sub-100ms catalog queries and protect the core transactional database, a 3-tier caching hierarchy is deployed:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                 MULTI-TIER CACHING TOPOLOGY                                     │
+├──────────────────────┬──────────────────────┬─────────────┬──────────────────┬──────────────────┤
+│ Cache Tier           │ Implementation       │ Latency     │ TTL Strategy     │ Eviction Policy  │
+├──────────────────────┼──────────────────────┼─────────────┼──────────────────┼──────────────────┤
+│ **L1: Application**  │ Caffeine (In-Memory) │ $< 1\text{ ms}$│ 5 to 15 seconds  │ Window TinyLFU   │
+│ **L2: Distributed**  │ Redis 7 Cluster      │ $2 - 5\text{ ms}$│ 60 to 300 seconds│ Volatile-LRU     │
+│ **L3: Edge CDN**     │ Cloudflare PoP Edge  │ $10 - 25\text{ ms}$│ 300s (Public)  │ Origin Purge Hook│
+└──────────────────────┴──────────────────────┴─────────────┴──────────────────┴──────────────────┘
+```
+
+#### Cache Stampede & Thundering Herd Mitigation
+When high-traffic catalog cache keys expire simultaneously, thousands of inbound requests breach the cache and hammer backend databases. We deploy the **Probabilistic Early Expiration (XFetch Algorithm)**:
+
+$$\Delta t = - \beta \times \delta \times \ln(\text{random}(0, 1))$$
+
+* Where:
+  * $\delta$: Time taken to recompute the catalog query from OpenSearch/PostgreSQL.
+  * $\beta$: Aggressiveness parameter ($> 0$, default $1.0$).
+* **Mechanism:** As current time approaches expiration, read operations probabilistically trigger an asynchronous background worker to refresh the Redis cache key *before* it officially expires, reducing cache miss spikes to zero.
+
+---
+
+### 5.7 Load Balancing, Traffic Routing & Rate Limiting
+
+#### 5.7.1 Multi-Layer Load Balancing Architecture
+
+```
+                       [ Incoming Global Traffic ]
+                                    │
+                                    ▼
+       ┌────────────────────────────────────────────────────────┐
+       │ Layer 1: Global Server Load Balancer (DNS Anycast)     │
+       │ Route 53 / Cloudflare Anycast to nearest AWS Region    │
+       └────────────────────────────┬───────────────────────────┘
+                                    │
+                                    ▼
+       ┌────────────────────────────────────────────────────────┐
+       │ Layer 2: Regional Network Load Balancer (AWS NLB - L4) │
+       │ High-throughput TCP / TLS passthrough (Millions PPS)  │
+       └────────────────────────────┬───────────────────────────┘
+                                    │
+                                    ▼
+       ┌────────────────────────────────────────────────────────┐
+       │ Layer 3: Application Gateway (Envoy Proxy - L7)        │
+       │ Path routing, mTLS, WAF, Token-Bucket Rate Limiter    │
+       └────────────────────────────┬───────────────────────────┘
+                                    │
+             ┌──────────────────────┴──────────────────────┐
+             ▼                                             ▼
+    [ Service Pod 1 ]                             [ Service Pod 2 ]
+```
+
+1. **Layer 1 — Global Server Load Balancing (GSLB / DNS Anycast):**
+   * Resolves `api.platform.com` to the nearest regional data center using latency-based routing and health checks.
+2. **Layer 2 — Layer 4 Network Load Balancer (AWS NLB):**
+   * Operates at the transport layer (TCP/UDP), terminating raw connections and distributing packets across Envoy gateway instances with ultra-low latency.
+3. **Layer 3 — Layer 7 Reverse Proxy (Envoy / Spring Cloud Gateway):**
+   * Inspects HTTP/2 and HTTP/3 headers, validates authorization JWTs, routes by URI regex, and applies intelligent load-balancing algorithms:
+     * **Weighted Least Request:** Routes to microservice pods with the fewest active requests, accounting for pod processing latency.
+     * **Locality-Prioritized Routing:** Favors pods in the same Availability Zone (AZ) to eliminate cross-AZ data transfer fees and network latency.
+
+#### 5.7.2 Distributed Rate Limiting (Token-Bucket Algorithm)
+Enforced at the Gateway using Redis to protect services against abusive traffic:
+
+```lua
+-- Redis Distributed Token Bucket Rate Limiter
+-- KEYS[1]: rate_limit:{client_id}:{endpoint}
+-- ARGV[1]: max_tokens (burst capacity)
+-- ARGV[2]: refill_rate_per_sec
+-- ARGV[3]: current_timestamp_seconds
+
+local key = KEYS[1]
+local max_tokens = tonumber(ARGV[1])
+local refill_rate = tonumber(ARGV[2])
+local now = tonumber(ARGV[3])
+
+local data = redis.call('HMGET', key, 'tokens', 'last_updated')
+local tokens = tonumber(data[1])
+local last_updated = tonumber(data[2])
+
+if not tokens then
+    tokens = max_tokens
+    last_updated = now
+else
+    local elapsed = math.max(0, now - last_updated)
+    tokens = math.min(max_tokens, tokens + elapsed * refill_rate)
+    last_updated = now
+end
+
+if tokens >= 1 then
+    tokens = tokens - 1
+    redis.call('HMSET', key, 'tokens', tokens, 'last_updated', last_updated)
+    redis.call('EXPIRE', key, 60)
+    return 1 -- Allowed
+else
+    return 0 -- Rate Limited (HTTP 429)
+end
 ```
 
 ---
 
-### 5.3 Realistic E-Commerce Capacity Planning & System Sizing
+### 5.8 Fault Tolerance, High Availability & Disaster Recovery
 
-#### 5.3.1 Traffic & Scale Parameters
-* **Registered Accounts:** $50,000,000$ users.
-* **Daily Active Users (DAU):** $5,000,000$ users.
-* **Peak Flash-Sale Concurrent Users:** $100,000$ active connections.
-* **Average Daily Completed Orders:** $500,000$ orders/day.
-* **Peak Order Velocity (Flash-Sale):** $1,000\text{ Orders/sec}$ ($1,000\text{ TPS}$).
-* **Browse-to-Buy Ratio:** $50 : 1$ (50 search/catalog reads per 1 order checkout).
-* **Peak Catalog Read Traffic:** $50,000\text{ QPS}$ at API Gateway.
+#### 5.8.1 Single Point of Failure (SPOF) Analysis & Mitigations
 
-#### 5.3.2 Storage Calculations
-1. **Order Transactions:**
-   * Average order record size (including JSON snapshots and line items): $4\text{ KB}$.
-   * Daily storage consumption: $500,000 \times 4\text{ KB} = 2.0\text{ GB/day}$.
-   * Annual order storage: $2.0\text{ GB} \times 365 = 730\text{ GB/year}$.
-   * 5-Year active transactional retention (PostgreSQL): $\approx 3.65\text{ TB}$ (trivially managed via monthly table partitioning).
-2. **Product Catalog & Media Assets:**
-   * $10,000,000$ active catalog SKUs $\times 2\text{ KB}$ metadata $= 20\text{ GB}$ raw RDBMS storage.
-   * OpenSearch Search Indices (with inverted text indices, vectors, and facets): $\approx 120\text{ GB}$.
-   * Product Images: $10,000,000\text{ SKUs} \times 4\text{ images} \times 400\text{ KB (WebP)} = 16\text{ TB}$ stored in AWS S3 / Google Cloud Storage, with $98\%$ served directly from Cloudflare Edge Caches.
-3. **Cart In-Memory Footprint (Redis):**
-   * $5,000,000\text{ active carts} \times 1.5\text{ KB (JSON structure)} = 7.5\text{ GB}$ active memory.
-   * Scaled with $3\times$ replication factor across 6 Redis shards: $22.5\text{ GB}$ total RAM required.
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                   SPOF DECONSTRUCTION & MITIGATION                              │
+├─────────────────────┬───────────────────────────┬───────────────────────────────────────────────┤
+│ System Component    │ Potential Single Point    │ Architectural Redundancy & Self-Healing       │
+├─────────────────────┼───────────────────────────┼───────────────────────────────────────────────┤
+│ **API Gateway**     │ Gateway instance crash    │ Deployed across 3 Availability Zones behind   │
+│                     │ or CPU saturation.        │ AWS NLB; horizontal pod autoscaling (HPA).    │
+├─────────────────────┼───────────────────────────┼───────────────────────────────────────────────┤
+│ **PostgreSQL Order  │ Primary DB node hardware  │ Multi-AZ Amazon RDS / Patroni cluster with    │
+│ Database**          │ failure or disk fault.    │ automated failover ($< 30\text{s}$) via sync  │
+│                     │                           │ standby; zero transaction loss.               │
+├─────────────────────┼───────────────────────────┼───────────────────────────────────────────────┤
+│ **Redis Cluster**   │ Shard master failure.     │ Master-Replica architecture; automatic quorum │
+│                     │                           │ election promotes replica in $< 5\text{s}$.   │
+├─────────────────────┼───────────────────────────┼───────────────────────────────────────────────┤
+│ **Apache Kafka**    │ Broker outage or disk     │ Topic replication factor $= 3$;               │
+│                     │ corruption.               │ `min.insync.replicas = 2`; zero data loss.    │
+├─────────────────────┼───────────────────────────┼───────────────────────────────────────────────┤
+│ **Payment Webhook** │ Network partition between │ Idempotent webhook receiver; external payment │
+│                     │ gateway and platform.     │ gateway retries with exponential backoff.     │
+└─────────────────────┴───────────────────────────┴───────────────────────────────────────────────┘
+```
 
-#### 5.3.3 Compute & Network Throughput
-* **Edge CDN Ingress/Egress:** Peak catalog egress at $50,000\text{ QPS} \times 15\text{ KB (compressed JSON)} = 750\text{ MB/s} = 6.0\text{ Gbps}$.
-* **API Gateway Sizing:** Envoy instances processing $50,000\text{ QPS}$; at $5,000\text{ QPS}$ per 8-core CPU node $\rightarrow 10$ active Gateway instances (autoscaling to 20 during flash sales).
-* **Kafka Cluster Throughput:** Peak write volume of $25,000\text{ events/sec} \times 2\text{ KB} = 50\text{ MB/s}$ ingress. A 5-broker Kafka cluster with NVMe SSDs handles this with $< 20\%$ disk I/O saturation.
+#### 5.8.2 Multi-Region Disaster Recovery Matrix
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                              DISASTER RECOVERY ARCHITECTURE                                     │
+├────────────────────┬────────────────────┬──────────┬──────────┬─────────────────────────────────┤
+│ Recovery Tier      │ Domains Covered    │ RPO      │ RTO      │ Technical Failover Strategy     │
+├────────────────────┼────────────────────┼──────────┼──────────┼─────────────────────────────────┤
+│ **Tier 0**         │ Order, Payment,    │ $< 1\text{s}$│ $< 3\text{min}$│ Multi-AZ Synchronous Primary    │
+│ (Mission Critical) │ Inventory, User    │          │          │ Standby; cross-region read replica│
+├────────────────────┼────────────────────┼──────────┼──────────┼─────────────────────────────────┤
+│ **Tier 1**         │ Cart, Offers,      │ $< 30\text{s}$│ $< 15\text{min}$│ Active-Passive Cross-Region     │
+│ (Business Critical)│ Serviceability     │          │          │ Kafka MirrorMaker 2.0 async sync│
+├────────────────────┼────────────────────┼──────────┼──────────┼─────────────────────────────────┤
+│ **Tier 2**         │ Product Catalog,   │ $< 1\text{hr}$│ $< 2\text{hr}$│ Read replicas in secondary DC;  │
+│ (Operational)      │ Reviews, Notif     │          │          │ hourly snapshot restore to S3   │
+├────────────────────┼────────────────────┼──────────┼──────────┼─────────────────────────────────┤
+│ **Tier 3**         │ Recommendations,   │ $< 24\text{hr}$│ $< 8\text{hr}$│ Analytical Lakehouse restore    │
+│ (Analytical)       │ Archival Analytics │          │          │ from cold S3 Parquet tables     │
+└────────────────────┴────────────────────┴──────────┴──────────┴─────────────────────────────────┘
+```
+
+* **Recovery Point Objective (RPO):** The maximum acceptable data loss window measured in time.
+* **Recovery Time Objective (RTO):** The maximum duration required to restore full service functionality after an outage.
 
 ---
 
-### 5.4 Flash-Sale Hardening & Concurrency Control
+### 5.9 Zero-Trust Security, Access Control & Compliance
 
-```
-                              ┌────────────────────────┐
-                              │  50,000 CONCURRENT USERS│
-                              └───────────┬────────────┘
-                                          │
-                                          ▼
-                              ┌────────────────────────┐
-                              │ CLOUDFLARE WAITING ROOM│ (Smooths excess spikes)
-                              └───────────┬────────────┘
-                                          │
-                                          ▼
-                              ┌────────────────────────┐
-                              │ API GATEWAY RATE LIMIT │ (Token-Bucket per User)
-                              └───────────┬────────────┘
-                                          │
-                  ┌───────────────────────┴───────────────────────┐
-                  │                                               │
-                  ▼                                               ▼
-      ┌───────────────────────┐                       ┌───────────────────────┐
-      │   HOT SKU (FLASH SALE)│                       │     STANDARD CATALOG  │
-      └───────────┬───────────┘                       └───────────┬───────────┘
-                  │                                               │
-                  ▼                                               ▼
-      ┌───────────────────────┐                       ┌───────────────────────┐
-      │ REDIS LUA ATOMIC LEASE│ (Sub-5ms Lockless)    │ POSTGRES READ-REPLICA │
-      └───────────┬───────────┘                       └───────────────────────┘
-                  │
-                  ▼
-      ┌───────────────────────┐
-      │ ASYNC KAFKA QUEUE     │ (Drives Saga DB writes)
-      └───────────────────────┘
-```
-
-1. **Virtual Waiting Room (Queue-It / Cloudflare Waiting Room):** Activated when checkout ingress exceeds $2,500\text{ requests/sec}$, metering traffic into the API Gateway deterministically.
-2. **Distributed Rate Limiting:** Enforced at the API Gateway via Redis Token-Bucket:
-   * Anonymous IP: Max $100\text{ requests/min}$.
-   * Authenticated Buyer: Max $1,000\text{ requests/min}$.
-   * Checkout Endpoint: Max $5\text{ attempts/min}$ per `userId`.
-3. **Cache Stampede Prevention:**
-   * **Probabilistic Early Expiration (XFetch Algorithm):** Recomputes catalog cache keys before they expire based on read frequency and background worker calculation time.
-   * **Singleflight Request Coalescing:** Gateway merges concurrent in-flight requests for identical product detail fetches, preventing backend query surges.
-4. **Hot SKU Locking with Redlock & Fencing Tokens:**
-   * High-value limited items utilize Redlock across 3 independent Redis nodes with monotonically increasing fencing tokens to prevent split-brain double-reservation.
-
----
-
-### 5.5 Zero-Trust Security, PCI DSS & Regulatory Compliance
-
-#### 5.5.1 Authentication, Authorization & Identity Management
-* **OAuth 2.0 & OpenID Connect (OIDC):** Microservices act as OAuth 2.0 Resource Servers validating JWT tokens issued by the User & IAM Service (powered by Keycloak / Ory Hydra).
-* **JWKS Cryptographic Rotation:** API Gateway verifies token signatures using public keys fetched from `https://auth.platform.com/.well-known/jwks.json`, with automated key rotation every 30 days.
-* **Workload Identity (SPIFFE/SPIRE):** Every Kubernetes pod receives a short-lived X.509 certificate validating its workload identity, establishing **STRICT mutual TLS (mTLS)** across all service-to-service communication via Istio.
-* **Fine-Grained RBAC / ABAC Permissions:** Enforced at Envoy sidecars via Open Policy Agent (OPA) filters:
-  ```json
-  {
-    "sub": "usr_9921049",
-    "iss": "https://auth.platform.com",
-    "roles": ["CUSTOMER"],
-    "scope": "openid profile cart:write order:create payment:initiate",
-    "exp": 1793572244,
-    "jti": "jwt_token_unique_id"
-  }
+#### 5.9.1 Mutual TLS (mTLS) with Istio & SPIFFE/SPIRE
+* Internal traffic between microservices rejects unencrypted connections.
+* Every microservice pod is injected with an Envoy sidecar proxy.
+* SPIFFE/SPIRE issues short-lived (1-hour validity) X.509 certificates to each pod based on its cryptographic service account identity (`spiffe://cluster.local/ns/prod/sa/order-service`).
+* Istio enforces **STRICT mTLS** and validates service authorization policies:
+  ```yaml
+  apiVersion: security.istio.io/v1beta1
+  kind: AuthorizationPolicy
+  metadata:
+    name: inventory-access-policy
+    namespace: prod
+  spec:
+    selector:
+      matchLabels:
+        app: inventory-service
+    action: ALLOW
+    rules:
+    - from:
+      - source:
+          principals: ["cluster.local/ns/prod/sa/order-service"]
+      to:
+      - operation:
+          methods: ["POST"]
+          paths: ["/com.platform.inventory.v1.InventoryService/*"]
   ```
 
-#### 5.5.2 PCI DSS Level 1 SAQ-A Compliance Boundary
-* **Zero Primary Account Number (PAN) Footprint:** No credit card numbers, CVVs, or expiration dates ever touch or transit platform servers.
-* **Tokenized Client-Side Capture:** Buyer enters card details directly into hosted iframes / SDKs provided by certified payment processors (Stripe Elements / Adyen Drop-in / Razorpay Checkout).
-* The Payment Service processes only opaque tokens (e.g., `tok_1N4m...`), satisfying **PCI DSS SAQ-A** eligibility and dramatically lowering compliance overhead.
+#### 5.9.2 PCI DSS Level 1 SAQ-A Architecture
+* **Zero Cardholder Data Scope:** No Primary Account Numbers (PAN), CVVs, or magnetic stripe data ever touch our compute nodes, memory spaces, or persistent databases.
+* **Client-Side Hosted Fields:** Web and mobile clients embed iframe fields hosted directly by the PCI DSS Level 1 payment processor (Stripe Elements / Adyen Drop-In).
+* Our backend receives only an opaque single-use token (`tok_live_9921...`), keeping all internal microservices out of PCI DSS Level 1 compliance audit scope (SAQ-A qualification).
 
-#### 5.5.3 Regulatory Framework Enforcement
-* **RBI Data Localization (India):** All transactional order, user PII, and financial settlement databases reside exclusively within AWS/GCP regions inside India (`ap-south-1` Mumbai / `ap-south-2` Hyderabad).
-* **GDPR Compliance (Right to Erasure / Portability):**
-  * When a user exercises their Right to be Forgotten, User Service publishes `UserAccountDeletedEvent`.
-  * The Archival Service executes a cryptographic erase or hard-delete of personal identifiers across cold tables, preserving anonymized order records for statutory accounting obligations.
-
----
-
-### 5.6 Enterprise Observability, SRE & Disaster Recovery
-
-#### 5.6.1 OpenTelemetry Distributed Tracing & W3C Standards
-Every inbound request at the API Gateway is tagged with a standard **W3C TraceContext** header:
-* `traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01`
-* Injected into downstream HTTP headers, gRPC metadata, and Kafka message headers.
-* Traces ingested into OpenTelemetry Collector and exported to **Grafana Tempo / Jaeger**, guaranteeing end-to-end request visibility across all 12 domains.
-
-#### 5.6.2 Metrics & Golden Signals (Prometheus / Alertmanager)
-* **RED Metrics:** Rate (requests/sec), Errors (5xx status count), Duration (P50, P95, P99 latency) per microservice.
-* **USE Metrics:** Utilization, Saturation, and Errors for CPU, memory, and database connection pools.
-* **Core Production Alerts:**
-  * **P0 - Critical (PagerDuty):** Order Service 5xx error rate $> 1.0\%$ for 2 consecutive minutes; Payment webhook failure rate $> 0.5\%$; Inventory Redis cluster CPU saturation $> 85\%$.
-  * **P1 - Warning (Slack):** P99 catalog search latency $> 250\text{ ms}$; Kafka consumer group lag $> 10,000\text{ messages}$; Free disk space $< 20\%$.
-
-#### 5.6.3 Disaster Recovery Tiering & Multi-Region Topology
-
-```
-┌────────────────────────────────────────────────────────────────────────────────────────┐
-│                              DISASTER RECOVERY ARCHITECTURE                            │
-├────────────────────┬────────────────────┬──────────┬──────────┬────────────────────────┤
-│ Recovery Tier      │ Domains Covered    │ RPO      │ RTO      │ Failover Topology      │
-├────────────────────┼────────────────────┼──────────┼──────────┼────────────────────────┤
-│ **Tier 0**         │ Order, Payment,    │ $< 1\text{ sec}$ │ $< 3\text{ min}$ │ Active-Active Hot Standby│
-│ (Mission Critical) │ Inventory, User    │          │          │ Multi-AZ Sync Repl     │
-├────────────────────┼────────────────────┼──────────┼──────────┼────────────────────────┤
-│ **Tier 1**         │ Cart, Offers,      │ $< 30\text{ s}$│ $< 15\text{ min}$│ Cross-Region Asymmetric│
-│ (Business Critical)│ Serviceability     │          │          │ Kafka MirrorMaker 2.0  │
-├────────────────────┼────────────────────┼──────────┼──────────┼────────────────────────┤
-│ **Tier 2**         │ Product Catalog,   │ $< 1\text{ hr}$  │ $< 2\text{ hr}$  │ Read Replicas + Hourly │
-│ (Operational)      │ Reviews, Notif     │          │          │ Snapshots to S3        │
-├────────────────────┼────────────────────┼──────────┼──────────┼────────────────────────┤
-│ **Tier 3**         │ Recommendations,   │ $< 24\text{ hr}$ │ $< 8\text{ hr}$  │ Batch Rehydration from │
-│ (Analytical)       │ Archival Analytics │          │          │ Cold Parquet Tables    │
-└────────────────────┴────────────────────┴──────────┴──────────┴────────────────────────┘
-```
-
-* **Recovery Point Objective (RPO):** Maximum acceptable data loss window during catastrophic regional failure.
-* **Recovery Time Objective (RTO):** Maximum duration to restore services following a disaster declaration.
-* **Automated Chaos Testing:** Chaos Mesh scheduled weekly in pre-production simulating pod evictions, network latency injection, and Kafka broker kills to continuously validate self-healing capabilities.
+#### 5.9.3 Statutory Compliance (RBI Data Localization & GDPR)
+1. **RBI Data Localization (India):** All transactional databases, primary payment ledgers, and user PII reside exclusively in Indian cloud data center regions (`ap-south-1` Mumbai and `ap-south-2` Hyderabad). Cross-border replication is cryptographically restricted.
+2. **GDPR Right to be Forgotten:** When a user submits an account deletion request, the User Service emits `UserAccountDeletedEvent`. The Archival and Search services execute automated pseudonymization and purge workflows across active and cold data stores.
 
 ---
 
